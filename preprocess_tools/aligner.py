@@ -95,7 +95,7 @@ def align_volume_xyz(volume, mask):
         cval=40                    # Fill value for regions outside input volume
     )
     
-    return aligned_volume.astype(np.int8)
+    return aligned_volume.astype(np.uint8)
 
 def measure_noise_skimage(image):
     """
