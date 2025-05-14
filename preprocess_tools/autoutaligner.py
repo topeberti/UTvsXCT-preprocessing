@@ -232,20 +232,34 @@ def align(data, gate):
     Returns:
     numpy.ndarray: Aligned data.
     """
-    # now do it for the whole volume
+    # Create an empty array with the same dimensions as the input data
     rolled_data = np.zeros_like(data)
+    
+    # Iterate through each pixel position in the 2D spatial dimensions
     for i in range(data.shape[1]):
         for j in range(data.shape[2]):
+            # Extract the 1D signal at this spatial location
             signal = data[:, i, j]
+            
+            # Extract only the portion of the signal within the gate range
             gated_data = signal[gate[0] : gate[1]]
+            
+            # Find the index of maximum absolute value within the gated range
             max_gated_data_index = np.argmax(np.abs(gated_data), axis=0)
+            
+            # Roll (shift) the signal to align the maximum with the start of the gate
+            # The negative sign ensures the shift moves the maximum to the beginning
             rolled = np.roll(signal, -max_gated_data_index)
+            
+            # Store the aligned signal in the result array
             rolled_data[:, i, j] = rolled
+            
     return rolled_data
 
-def double_align(data,rf, gate):
+def double_align(data, rf, gate):
     """
     This function aligns the data and RF signals in a 3D volume based on the maximum value in a gated range.
+    Both data and RF arrays are aligned using the same shift values derived from the data array.
     
     Parameters:
     data (numpy.ndarray): 3D array representing the volume of an image.
@@ -255,19 +269,31 @@ def double_align(data,rf, gate):
     Returns:
     tuple: Aligned data and RF signals.
     """
-    # now do it for the whole volume
+    # Create empty arrays with the same dimensions as the input data and RF
     rolled_data = np.zeros_like(data)
     rolled_RF = np.zeros_like(rf)
+    
+    # Iterate through each pixel position in the 2D spatial dimensions
     for i in range(data.shape[1]):
         for j in range(data.shape[2]):
+            # Extract the 1D signal at this spatial location from data array
             signal = data[:, i, j]
+            
+            # Extract only the portion of the signal within the gate range
             gated_data = signal[gate[0] : gate[1]]
+            
+            # Find the index of maximum absolute value within the gated range
             max_gated_data_index = np.argmax(np.abs(gated_data), axis=0)
+            
+            # Roll (shift) the data signal to align the maximum with the start of the gate
             rolled = np.roll(signal, -max_gated_data_index)
             rolled_data[:, i, j] = rolled
 
+            # Extract the RF signal at the same spatial location
             rfsignal = rf[:, i, j]
+            
+            # Apply the same shift to the RF signal to maintain consistency
             rolled_rf_signal = np.roll(rfsignal, -max_gated_data_index)
             rolled_RF[:, i, j] = rolled_rf_signal
 
-    return rolled_data,rolled_RF
+    return rolled_data, rolled_RF

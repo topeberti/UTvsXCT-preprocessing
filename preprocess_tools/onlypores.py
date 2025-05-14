@@ -1,3 +1,11 @@
+"""
+Pore Detection and Material Segmentation Module
+
+This module provides functions for detecting pores in 3D volumes using various thresholding techniques.
+It includes functionality for Sauvola and Otsu thresholding, material masking, and pore extraction
+from X-ray CT scan data. The module supports parallel processing to improve performance on large datasets.
+"""
+
 import numpy as np
 from skimage import measure
 from skimage.measure import regionprops
@@ -11,29 +19,37 @@ from skimage.measure import label
 def sauvola_thresholding(volume, window_size=49, k=0.05, min_size=100):
     """
     Apply Sauvola thresholding and remove small objects from a 3D volume.
+    
+    Sauvola thresholding is an adaptive thresholding method that works well for images with varying
+    background intensity. This function applies the algorithm slice by slice to a 3D volume and then
+    removes small objects to reduce noise.
 
     Parameters:
-    - volume: 3D numpy array
-    - window_size: size of the local window for Sauvola thresholding
-    - k: parameter for Sauvola thresholding
-    - min_size: minimum size of objects to keep
+    - volume: 3D numpy array - Input volume to be thresholded
+    - window_size: int - Size of the local window for Sauvola thresholding (default: 49)
+    - k: float - Parameter that controls threshold sensitivity (default: 0.05)
+    - min_size: int - Minimum size of objects to keep after thresholding (default: 100)
 
     Returns:
     - binary_volume: 3D binary numpy array after Sauvola thresholding and small object removal
     """
 
     def sauvola_slice(slice_):
-        sauvola_threshold = threshold_sauvola(slice_, window_size=49, k=0.05)
+        """Apply Sauvola thresholding to a single 2D slice."""
+        sauvola_threshold = threshold_sauvola(slice_, window_size=window_size, k=k)
+        # Values below threshold are considered features (pores)
         return slice_ < sauvola_threshold
 
     def remove_small_objects_slice(slice_):
-        labeled_slice = label(slice_)
-        return remove_small_objects(labeled_slice, min_size=100) <= 0
+        """Remove small objects from a binary 2D slice to reduce noise."""
+        labeled_slice = label(slice_)  # Label connected components
+        # Remove small objects and invert the result to keep pores
+        return remove_small_objects(labeled_slice, min_size=min_size) <= 0
 
-    # Apply Sauvola thresholding to each slice in parallel
+    # Apply Sauvola thresholding to each slice in parallel using all available cores (-1)
     sauvola_noisy = np.array(Parallel(n_jobs=-1)(delayed(sauvola_slice)(volume[i]) for i in range(volume.shape[0])))
 
-    # Remove small objects from each slice in parallel
+    # Remove small objects from each slice in parallel to clean up the thresholded result
     binary_volume = np.array(Parallel(n_jobs=-1)(delayed(remove_small_objects_slice)(sauvola_noisy[i]) for i in range(sauvola_noisy.shape[0])))
 
     return binary_volume
@@ -59,6 +75,17 @@ def otsu_thresholding(volume):
     return binary
 
 def onlypores(xct):
+    """
+    Extract pores from a 3D volume using Sauvola thresholding.
+
+    Parameters:
+    - xct: 3D numpy array - Input volume
+
+    Returns:
+    - onlypores: 3D binary numpy array - Detected pores
+    - sample_mask: 3D binary numpy array - Material mask
+    - binary: 3D binary numpy array - Thresholded volume
+    """
     print('masking')
     
     # Find the bounding box of non-zero values
@@ -108,6 +135,17 @@ def onlypores(xct):
     return onlypores, sample_mask, binary
 
 def onlypores_parallel(xct):
+    """
+    Extract pores from a 3D volume using parallel processing.
+
+    Parameters:
+    - xct: 3D numpy array - Input volume
+
+    Returns:
+    - onlypores: 3D binary numpy array - Detected pores
+    - sample_mask: 3D binary numpy array - Material mask
+    - binary: 3D binary numpy array - Thresholded volume
+    """
 
     # Function to apply the mask and compress the data
     def mask_and_compress(xct_chunk):
@@ -156,6 +194,15 @@ def onlypores_parallel(xct):
     return onlypores, sample_mask, binary
 
 def material_mask_parallel(xct):
+    """
+    Generate a material mask for a 3D volume using parallel processing.
+
+    Parameters:
+    - xct: 3D numpy array - Input volume
+
+    Returns:
+    - sample_mask: 3D binary numpy array - Material mask
+    """
 
     # Function to apply Otsu thresholding and process each chunk
     def process_chunk(xct_chunk):
@@ -188,16 +235,25 @@ def material_mask_parallel(xct):
     return sample_mask
 
 def material_mask(xct): #Material mask but not parallel
+    """
+    Generate a material mask for a 3D volume.
+
+    Parameters:
+    - xct: 3D numpy array - Input volume
+
+    Returns:
+    - sample_mask: 3D binary numpy array - Material mask
+    """
     
-        threshold_value = filters.threshold_otsu(xct)
-        binary = xct > threshold_value
-        max_proj = np.max(binary, axis=0)
-        labels = measure.label(max_proj)
-        props = regionprops(labels)
-        minr, minc, maxr, maxc = props[0].bbox
-        binary_cropped = binary[:, minr:maxr, minc:maxc]
-        sample_mask_cropped = fill_voids.fill(binary_cropped, in_place=False)
-        sample_mask = np.zeros_like(binary)
-        sample_mask[:, minr:maxr, minc:maxc] = sample_mask_cropped
-    
-        return sample_mask
+    threshold_value = filters.threshold_otsu(xct)
+    binary = xct > threshold_value
+    max_proj = np.max(binary, axis=0)
+    labels = measure.label(max_proj)
+    props = regionprops(labels)
+    minr, minc, maxr, maxc = props[0].bbox
+    binary_cropped = binary[:, minr:maxr, minc:maxc]
+    sample_mask_cropped = fill_voids.fill(binary_cropped, in_place=False)
+    sample_mask = np.zeros_like(binary)
+    sample_mask[:, minr:maxr, minc:maxc] = sample_mask_cropped
+
+    return sample_mask
