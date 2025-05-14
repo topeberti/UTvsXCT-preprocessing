@@ -1,6 +1,6 @@
 # Import necessary libraries
 import numpy as np                      # For numerical operations and array manipulations
-import onlypores                        # Custom module for material segmentation
+from . import onlypores                # Custom module for material segmentation
 from scipy.ndimage import affine_transform, rotate  # For geometric transformations
 from skimage.restoration import estimate_sigma      # For noise estimation
 
@@ -14,7 +14,7 @@ def align_volume_xyz(volume, mask):
         mask (numpy.ndarray): Binary mask identifying the object in the volume.
         
     Returns:
-        numpy.ndarray: Aligned volume
+        numpy.ndarray: Aligned volume (int8)
     """
     # 1. Get object voxel coordinates - these are the points where mask == 1
     points_xyz = np.argwhere(mask)  # Returns coordinates of non-zero points in the mask
@@ -69,9 +69,18 @@ def align_volume_xyz(volume, mask):
     # 8. Ensure proper rotation matrix (determinant should be 1, not -1)
     if np.linalg.det(matrix_candidate) < 0:
         matrix_candidate[:, dims_idx[2]] *= -1  # Flip the shortest dimension
-    
-    # 9. Calculate offset to center the transformed object in the output volume
-    output_center_xyz = (np.array(volume.shape) - 1) / 2.0
+
+    # 9. Calculate offset and output shape to avoid clipping
+    # Get all 8 corners of the original volume
+    shape = np.array(volume.shape)
+    corners = np.array(np.meshgrid([0, shape[0]-1], [0, shape[1]-1], [0, shape[2]-1])).T.reshape(-1,3)
+    # Transform corners
+    transformed_corners = np.dot(matrix_candidate, (corners - centroid_xyz).T).T + centroid_xyz
+    min_corner = np.floor(transformed_corners.min(axis=0)).astype(int)
+    max_corner = np.ceil(transformed_corners.max(axis=0)).astype(int)
+    new_shape = (max_corner - min_corner + 1)
+    # Calculate new center and offset
+    output_center_xyz = (new_shape - 1) / 2.0
     offset_vector = centroid_xyz - matrix_candidate @ output_center_xyz
 
     print('Transforming')
@@ -81,12 +90,12 @@ def align_volume_xyz(volume, mask):
         volume.astype(float),
         matrix=matrix_candidate,   # Rotation matrix
         offset=offset_vector,      # Translation vector
-        output_shape=volume.shape, # Keep the same dimensions
-        order=3,                   # Cubic interpolation for smooth results
+        output_shape=tuple(new_shape), # Expanded shape
+        order=1,                   # Cubic interpolation for smooth results
         cval=40                    # Fill value for regions outside input volume
     )
     
-    return aligned_volume
+    return aligned_volume.astype(np.int8)
 
 def measure_noise_skimage(image):
     """
@@ -194,16 +203,17 @@ def find_frontwall(mask, max_slice=50):
 
     return flat_start_idx
 
-def main(volume):
+def main(volume,crop = False):
     """
     Main function that processes a 3D volume:
     1. Generates a material mask
     2. Aligns the volume to principal axes
     3. Finds the front wall
-    4. Returns the aligned volume cropped to start at the front wall
+    4. Returns the aligned volume cropped (if crop = True) to start at the front wall
     
     Args:
         volume (numpy.ndarray): 3D int8 volume with axes (x,y,z).
+        crop (bool): If True, crop the volume to start at the front wall.
         
     Returns:
         volume (numpy.ndarray): Aligned and cropped volume.
@@ -214,8 +224,12 @@ def main(volume):
     # Align the volume so principal axes match coordinate axes
     aligned_volume = align_volume_xyz(volume, mask)
 
-    # Generate a new mask for the aligned volume
-    aligned_mask = onlypores.material_mask_parallel(aligned_volume)
+    if not crop:
+
+        # Generate a new mask for the aligned volume
+        aligned_mask = onlypores.material_mask_parallel(aligned_volume)
+
+        return aligned_volume
     
     # Find the front wall (first stable slice with material)
     front_wall_index = find_frontwall(aligned_mask)
