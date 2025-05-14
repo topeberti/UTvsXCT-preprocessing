@@ -17,8 +17,6 @@ setup(
         "joblib",
         "tqdm",
         "tifffile",
-        "psycopg2-binary",
-        "python-dotenv"
     ],
     classifiers=[
         'Programming Language :: Python :: 3',
