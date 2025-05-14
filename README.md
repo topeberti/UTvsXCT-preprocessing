@@ -15,3 +15,17 @@ or, to install directly from the repository:
 ```bash
 pip install git+https://github.com/topeberti/UTvsXCT-preprocessing.git
 ```
+
+## Importing the module
+
+After installation, you can import the module in your Python scripts as follows:
+
+```python
+import preprocess_tools
+```
+
+Or import specific functions or classes:
+
+```python
+from preprocess_tools import your_function_or_class
+```
