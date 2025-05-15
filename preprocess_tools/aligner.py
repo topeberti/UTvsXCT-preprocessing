@@ -203,6 +203,46 @@ def find_frontwall(mask, max_slice=50):
 
     return flat_start_idx
 
+def centering(volume,mask):
+    """
+    Center the volume based on the material mask.
+    
+    Args:
+        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z).
+        mask (numpy.ndarray): Binary mask identifying the object in the volume.
+        
+    Returns:
+        numpy.ndarray: Centered volume (uint8)
+    """
+    # Find the bounding box of the object in the mask
+    coords = np.where(mask)
+    zmin, zmax = coords[0].min(), coords[0].max()
+    ymin, ymax = coords[1].min(), coords[1].max()
+    xmin, xmax = coords[2].min(), coords[2].max()
+
+    print(f"Bounding box coordinates: zmin={zmin}, zmax={zmax}, ymin={ymin}, ymax={ymax}, xmin={xmin}, xmax={xmax}")
+
+    # Crop both arrays
+    return volume[zmin:zmax+1, ymin:ymax+1, xmin:xmax+1], mask[zmin:zmax+1, ymin:ymax+1, xmin:xmax+1]
+
+def crop_volume(volume, mask):
+    """
+    Crop the volume to start at the front wall.
+
+    Args:
+        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z).
+        mask (numpy.ndarray): Binary mask identifying the object in the volume.
+
+    Returns:
+        numpy.ndarray: Cropped volume (uint8)
+    """
+
+    # Find the front wall (first stable slice with material)
+    front_wall_index = find_frontwall(mask)
+    
+    # Return the aligned volume cropped to start at the front wall
+    return volume[:,:,front_wall_index:]
+
 def main(volume,crop = False):
     """
     Main function that processes a 3D volume:
@@ -222,17 +262,15 @@ def main(volume,crop = False):
     mask = onlypores.material_mask_parallel(volume)
 
     # Align the volume so principal axes match coordinate axes
-    aligned_volume = align_volume_xyz(volume, mask)
+    volume = align_volume_xyz(volume, mask)
+
+    # Generate a new mask for the aligned volume
+    mask = onlypores.material_mask_parallel(volume)
+
+    volume,mask = centering(volume,mask)
 
     if not crop:
 
-        # Generate a new mask for the aligned volume
-        aligned_mask = onlypores.material_mask_parallel(aligned_volume)
-
-        return aligned_volume
+        return volume
     
-    # Find the front wall (first stable slice with material)
-    front_wall_index = find_frontwall(aligned_mask)
-    
-    # Return the aligned volume cropped to start at the front wall
-    return aligned_volume[:,:,front_wall_index:]
+    return crop_volume(volume, mask)
