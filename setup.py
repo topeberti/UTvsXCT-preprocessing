@@ -17,6 +17,7 @@ setup(
         "joblib",
         "tqdm",
         "tifffile",
+        "PyWavelets "
     ],
     classifiers=[
         'Programming Language :: Python :: 3',

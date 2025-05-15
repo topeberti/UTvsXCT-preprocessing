@@ -10,11 +10,11 @@ def align_volume_xyz(volume, mask):
     principal axes of the object align with the coordinate axes (X, Y, Z).
     
     Args:
-        volume (numpy.ndarray): 3D int8 volume with axes (x,y,z).
+        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z).
         mask (numpy.ndarray): Binary mask identifying the object in the volume.
         
     Returns:
-        numpy.ndarray: Aligned volume (int8)
+        numpy.ndarray: Aligned volume (uint8)
     """
     # 1. Get object voxel coordinates - these are the points where mask == 1
     points_xyz = np.argwhere(mask)  # Returns coordinates of non-zero points in the mask
@@ -225,7 +225,7 @@ def centering(volume,mask):
     # Crop both arrays
     return volume[zmin:zmax+1, ymin:ymax+1, xmin:xmax+1], mask[zmin:zmax+1, ymin:ymax+1, xmin:xmax+1]
 
-def crop_volume(volume, mask):
+def crop_wall(volume, mask):
     """
     Crop the volume to start at the front wall.
 
@@ -243,6 +243,31 @@ def crop_volume(volume, mask):
     # Return the aligned volume cropped to start at the front wall
     return volume[:,:,front_wall_index:]
 
+def crop_walls(volume, mask = None):
+    """
+    Crop the volume to start at the front wall and end at the back wall.
+
+    Args:
+        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z).
+        mask (numpy.ndarray): Binary mask identifying the object in the volume.
+
+    Returns:
+        numpy.ndarray: Cropped volume (uint8)
+    """
+
+    if mask is None:
+        # Generate mask identifying material voxels in the original volume
+        mask = onlypores.material_mask_parallel(volume)
+
+    # Find the front wall (first stable slice with material)
+    front_wall_index = find_frontwall(mask)
+
+    # Find the back wall (last stable slice with material)
+    back_wall_index = mask.shape[2] - find_frontwall(np.flip(mask, axis=2))
+
+    # Return the aligned volume cropped to start at the front wall and end at the back wall
+    return volume[:,:,front_wall_index:back_wall_index]
+
 def main(volume,crop = False):
     """
     Main function that processes a 3D volume:
@@ -252,7 +277,7 @@ def main(volume,crop = False):
     4. Returns the aligned volume cropped (if crop = True) to start at the front wall
     
     Args:
-        volume (numpy.ndarray): 3D int8 volume with axes (x,y,z).
+        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z).
         crop (bool): If True, crop the volume to start at the front wall.
         
     Returns:
@@ -273,4 +298,4 @@ def main(volume,crop = False):
 
         return volume
     
-    return crop_volume(volume, mask)
+    return crop_wall(volume, mask)

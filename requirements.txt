@@ -7,3 +7,4 @@ tifffile
 pandas
 matplotlib
 fill_voids
+PyWavelets 
