@@ -253,6 +253,8 @@ def crop_walls(volume, mask = None):
 
     Returns:
         numpy.ndarray: Cropped volume (uint8)
+        int: Index of the front wall slice.
+        int: Index of the back wall slice.
     """
 
     if mask is None:
@@ -266,7 +268,7 @@ def crop_walls(volume, mask = None):
     back_wall_index = mask.shape[2] - find_frontwall(np.flip(mask, axis=2))
 
     # Return the aligned volume cropped to start at the front wall and end at the back wall
-    return volume[:,:,front_wall_index:back_wall_index]
+    return volume[:,:,front_wall_index:back_wall_index], front_wall_index, back_wall_index
 
 def main(volume,crop = False):
     """
