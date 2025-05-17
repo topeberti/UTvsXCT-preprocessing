@@ -300,4 +300,6 @@ def main(volume,crop = False):
 
         return volume
     
-    return crop_wall(volume, mask)
+    volume,_,_ = crop_walls(volume,mask)
+    
+    return volume
