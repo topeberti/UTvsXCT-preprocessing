@@ -74,7 +74,7 @@ def otsu_thresholding(volume):
 
     return binary
 
-def onlypores(xct, frontwall = 0, backwall = 0):
+def onlypores(xct, frontwall = 0, backwall = 0, sauvola_radius = 49, sauvola_k = 0.05):
     """
     Extract pores from a 3D volume using Sauvola thresholding.
 
@@ -117,7 +117,7 @@ def onlypores(xct, frontwall = 0, backwall = 0):
     
     print('Thresholding')
     # Apply Sauvola thresholding to the cropped volume
-    binary_cropped = sauvola_thresholding(cropped_volume)
+    binary_cropped = sauvola_thresholding(cropped_volume, window_size=sauvola_radius, k=sauvola_k)
 
     print(binary_cropped.max())
 

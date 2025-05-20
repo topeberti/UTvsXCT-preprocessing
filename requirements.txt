@@ -7,4 +7,5 @@ tifffile
 pandas
 matplotlib
 fill_voids
-PyWavelets 
+PyWavelets
+git+https://github.com/topeberti/utxct-db-tools.git
