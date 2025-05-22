@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='preprocess_tools',
-    version='0.1.4',
+    version='0.1.3',
     author='Alberto Vicente del Egido',
     author_email='alberto.vicente@imdea.org',
     description='Database utilities and preprocessing tools for UT vs XCT database',
