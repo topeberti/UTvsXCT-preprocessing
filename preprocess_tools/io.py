@@ -102,3 +102,20 @@ def load_tif(path):
         raise ValueError("Invalid path: must be a directory or a TIFF file.")
     
     return volume
+
+def save_tif(path, volume):
+    """
+    Save a 3D volume as a TIF/TIFF file or a sequence of TIF/TIFF files.
+
+    Args:
+    path (str): Path to the output TIFF file/folder.
+    volume (numpy.ndarray): A 3D array representing the volume.
+    """
+    
+    # Check if the path is a directory or a file
+    if os.path.isdir(path):
+        # If it's a directory, save the volume as a sequence of TIFF files
+        write_sequence(path, "output", volume)
+    else:
+        # If it's a file, save the single TIFF file
+        tifffile.imwrite(path, volume)

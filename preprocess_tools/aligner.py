@@ -4,7 +4,7 @@ from . import onlypores                # Custom module for material segmentation
 from scipy.ndimage import affine_transform, rotate  # For geometric transformations
 from skimage.restoration import estimate_sigma      # For noise estimation
 
-def align_volume_xyz(volume, mask):
+def align_volume_xyz(volume, mask, order = 3, cval = 40):
     """
     Aligns a 3D volume using Principal Component Analysis (PCA) such that the 
     principal axes of the object align with the coordinate axes (X, Y, Z).
@@ -12,6 +12,8 @@ def align_volume_xyz(volume, mask):
     Args:
         volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z).
         mask (numpy.ndarray): Binary mask identifying the object in the volume.
+        order (int): Interpolation order for affine transformation (default is 3).
+        cval (int): Fill value for regions outside the input volume (default is 40).
         
     Returns:
         numpy.ndarray: Aligned volume (uint8)
@@ -91,8 +93,8 @@ def align_volume_xyz(volume, mask):
         matrix=matrix_candidate,   # Rotation matrix
         offset=offset_vector,      # Translation vector
         output_shape=tuple(new_shape), # Expanded shape
-        order=1,                   # Cubic interpolation for smooth results
-        cval=40                    # Fill value for regions outside input volume
+        order=order,                   # Cubic interpolation for smooth results
+        cval=cval                    # Fill value for regions outside input volume
     )
     
     return aligned_volume.astype(np.uint8)
@@ -270,7 +272,7 @@ def crop_walls(volume, mask = None):
     # Return the aligned volume cropped to start at the front wall and end at the back wall
     return volume[:,:,front_wall_index:back_wall_index], front_wall_index, back_wall_index
 
-def main(volume,crop = False):
+def main(volume,crop = False, order = 3, cval = 40):
     """
     Main function that processes a 3D volume:
     1. Generates a material mask
@@ -281,6 +283,8 @@ def main(volume,crop = False):
     Args:
         volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z).
         crop (bool): If True, crop the volume to start at the front wall.
+        order (int): Interpolation order for affine transformation (default is 3).
+        cval (int): Fill value for regions outside the input volume (default is 40).
         
     Returns:
         volume (numpy.ndarray): Aligned and cropped volume.
@@ -289,7 +293,7 @@ def main(volume,crop = False):
     mask = onlypores.material_mask_parallel(volume)
 
     # Align the volume so principal axes match coordinate axes
-    volume = align_volume_xyz(volume, mask)
+    volume = align_volume_xyz(volume, mask, order, cval)
 
     # Generate a new mask for the aligned volume
     mask = onlypores.material_mask_parallel(volume)
