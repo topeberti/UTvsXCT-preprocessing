@@ -16,7 +16,7 @@ from skimage.filters import threshold_sauvola
 from skimage.morphology import remove_small_objects
 from skimage.measure import label
 
-def sauvola_thresholding(volume, window_size=49, k=0.05, min_size=100):
+def sauvola_thresholding(volume, window_size=49, k=0.05, min_size=1):
     """
     Apply Sauvola thresholding and remove small objects from a 3D volume.
     
@@ -116,8 +116,13 @@ def onlypores(xct, frontwall = 0, backwall = 0, sauvola_radius = 49, sauvola_k =
     print(f'Cropped volume shape: {cropped_volume.shape}')
     
     print('Thresholding')
+    #swap axes to use sauvola in the right orientation
+    #the right orientation for sauvola is the perpendicular plane to the frontwall
+    binary_cropped = np.swapaxes(cropped_volume, 0, 2)
     # Apply Sauvola thresholding to the cropped volume
-    binary_cropped = sauvola_thresholding(cropped_volume, window_size=sauvola_radius, k=sauvola_k)
+    binary_cropped = sauvola_thresholding(binary_cropped, window_size=sauvola_radius, k=sauvola_k)
+    #undo the swap axes
+    binary_cropped = np.swapaxes(binary_cropped, 0, 2)
 
     print(binary_cropped.max())
 
