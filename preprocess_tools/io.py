@@ -58,6 +58,16 @@ def write_sequence(folder_path, name, volume):
 
 def to_matrix(string):
 
+    """
+    Convert a database string representation of an affine transform matrix into a numpy array.
+    
+    Args:
+    string (str): A database string representation of the affine transform matrix.
+
+    Returns:
+    numpy.ndarray: A 3x3 numpy array representing the affine transform matrix.
+    """
+
     matrix1 = float(string[2:17])
 
     matrix2 = float(string[17:33])

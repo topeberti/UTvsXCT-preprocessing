@@ -45,3 +45,33 @@ Or import specific functions or classes:
 ```python
 from preprocess_tools import your_function_or_class
 ```
+
+## Documentation
+
+You can generate and view the documentation for this package using [pdoc](https://pdoc.dev/):
+
+### Generate and view documentation locally
+
+1. Install the requirements (if not already done):
+
+```bash
+pip install -r requirements.txt
+```
+
+2. Generate and serve the documentation for the `preprocess_tools` module:
+
+```bash
+pdoc .\preprocess_tools
+```
+
+3. This will start a local web server and open your browser to view the documentation. If it does not open automatically, follow the link shown in the terminal (usually http://localhost:8080).
+
+4. To generate static HTML files instead, run:
+
+```bash
+pdoc -o docs_html .\preprocess_tools
+```
+
+This will create HTML documentation in the `docs_html` folder.
+
+

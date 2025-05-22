@@ -9,3 +9,4 @@ matplotlib
 fill_voids
 PyWavelets
 git+https://github.com/topeberti/utxct-db-tools.git
+pdoc
