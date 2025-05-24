@@ -15,10 +15,11 @@ from joblib import Parallel, delayed
 from skimage.filters import threshold_sauvola
 from skimage.morphology import remove_small_objects
 from skimage.measure import label
+import psutil
 
-def sauvola_thresholding(volume, window_size, k):
+def sauvola_thresholding_concurrent(volume, window_size, k):
     """
-    Apply Sauvola thresholding and remove small objects from a 3D volume along axis 1 (y-axis).
+    Apply Sauvola thresholding in a 3D volume along axis 1 (y-axis).
     
     Sauvola thresholding is an adaptive thresholding method that works well for images with varying
     background intensity. This function applies the algorithm slice by slice to a 3D volume and then
@@ -31,7 +32,7 @@ def sauvola_thresholding(volume, window_size, k):
     - min_size: int - Minimum size of objects to keep after thresholding (default: 100)
 
     Returns:
-    - binary_volume: 3D binary numpy array after Sauvola thresholding and small object removal
+    - binary_volume: 3D binary numpy array after Sauvola thresholding
     """
 
     #if window size is even, increase it by 1 to make it odd
@@ -52,6 +53,49 @@ def sauvola_thresholding(volume, window_size, k):
     binary_volume = np.transpose(binary_volume, (1, 0, 2))
 
     return binary_volume
+
+def sauvola_thresholding_nonconcurrent(volume, window_size, k):
+    """
+    Apply Sauvola thresholding in a 3D volume along axis 1 (y-axis),
+    in a non-concurrent and memory-efficient way.
+
+    Parameters:
+    - volume: 3D numpy array - Input volume to be thresholded
+    - window_size: int - Size of the local window for Sauvola thresholding
+    - k: float - Parameter that controls threshold sensitivity
+
+    Returns:
+    - binary_volume: 3D binary numpy array after Sauvola thresholding
+    """
+    if window_size % 2 == 0:
+        window_size += 1
+    binary_volume = np.zeros_like(volume, dtype=bool)
+    for i in range(volume.shape[1]):
+        slice_ = volume[:, i, :]
+        sauvola_threshold = threshold_sauvola(slice_, window_size=window_size, k=k, r=128)
+        binary_volume[:, i, :] = slice_ > sauvola_threshold
+    return binary_volume
+
+def sauvola_thresholding(volume, window_size, k):
+    """
+    Apply Sauvola thresholding to a 3D volume, automatically choosing concurrent or non-concurrent
+    implementation based on available system memory.
+
+    Parameters:
+    - volume: 3D numpy array - Input volume to be thresholded
+    - window_size: int - Size of the local window for Sauvola thresholding
+    - k: float - Parameter that controls threshold sensitivity
+
+    Returns:
+    - binary_volume: 3D binary numpy array after Sauvola thresholding
+    """
+    # Estimate memory required for concurrent processing (rough estimate: 2x input size)
+    required_mem_bytes = volume.nbytes * 2
+    available_mem_bytes = psutil.virtual_memory().available
+    if available_mem_bytes > required_mem_bytes:
+        return sauvola_thresholding_concurrent(volume, window_size, k)
+    else:
+        return sauvola_thresholding_nonconcurrent(volume, window_size, k)
 
 def otsu_thresholding(volume):
     """
