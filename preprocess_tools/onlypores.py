@@ -16,9 +16,9 @@ from skimage.filters import threshold_sauvola
 from skimage.morphology import remove_small_objects
 from skimage.measure import label
 
-def sauvola_thresholding(volume, window_size=49, k=0.05, min_size=1):
+def sauvola_thresholding(volume, window_size, k):
     """
-    Apply Sauvola thresholding and remove small objects from a 3D volume.
+    Apply Sauvola thresholding and remove small objects from a 3D volume along axis 1 (y-axis).
     
     Sauvola thresholding is an adaptive thresholding method that works well for images with varying
     background intensity. This function applies the algorithm slice by slice to a 3D volume and then
@@ -34,23 +34,22 @@ def sauvola_thresholding(volume, window_size=49, k=0.05, min_size=1):
     - binary_volume: 3D binary numpy array after Sauvola thresholding and small object removal
     """
 
+    #if window size is even, increase it by 1 to make it odd
+    # this is necessary for Sauvola thresholding implentation
+    if window_size % 2 == 0:
+        window_size += 1
+
     def sauvola_slice(slice_):
         """Apply Sauvola thresholding to a single 2D slice."""
-        sauvola_threshold = threshold_sauvola(slice_, window_size=window_size, k=k)
+        sauvola_threshold = threshold_sauvola(slice_, window_size=window_size, k=k, r=128)
         # Values below threshold are considered features (pores)
-        return slice_ < sauvola_threshold
+        return slice_ > sauvola_threshold
 
-    def remove_small_objects_slice(slice_):
-        """Remove small objects from a binary 2D slice to reduce noise."""
-        labeled_slice = label(slice_)  # Label connected components
-        # Remove small objects and invert the result to keep pores
-        return remove_small_objects(labeled_slice, min_size=min_size) <= 0
+    # Apply Sauvola thresholding to each slice along axis 1 (y-axis) in parallel
+    binary_volume = np.array(Parallel(n_jobs=-1)(delayed(sauvola_slice)(volume[:, i, :]) for i in range(volume.shape[1])))
 
-    # Apply Sauvola thresholding to each slice in parallel using all available cores (-1)
-    sauvola_noisy = np.array(Parallel(n_jobs=-1)(delayed(sauvola_slice)(volume[i]) for i in range(volume.shape[0])))
-
-    # Remove small objects from each slice in parallel to clean up the thresholded result
-    binary_volume = np.array(Parallel(n_jobs=-1)(delayed(remove_small_objects_slice)(sauvola_noisy[i]) for i in range(sauvola_noisy.shape[0])))
+    # The result shape is (num_y, z, x), so we need to transpose axes to (z, y, x)
+    binary_volume = np.transpose(binary_volume, (1, 0, 2))
 
     return binary_volume
 
@@ -74,7 +73,7 @@ def otsu_thresholding(volume):
 
     return binary
 
-def onlypores(xct, frontwall = 0, backwall = 0, sauvola_radius = 49, sauvola_k = 0.05):
+def onlypores(xct, frontwall = 0, backwall = 0, sauvola_radius = 30, sauvola_k = 0.125):
     """
     Extract pores from a 3D volume using Sauvola thresholding.
 
@@ -113,18 +112,9 @@ def onlypores(xct, frontwall = 0, backwall = 0, sauvola_radius = 49, sauvola_k =
     # Extract the cropped volume
     cropped_volume = xct[min_z:max_z+1, min_y:max_y+1, min_x:max_x+1]
     
-    print(f'Cropped volume shape: {cropped_volume.shape}')
-    
     print('Thresholding')
-    #swap axes to use sauvola in the right orientation
-    #the right orientation for sauvola is the perpendicular plane to the frontwall
-    binary_cropped = np.swapaxes(cropped_volume, 0, 2)
     # Apply Sauvola thresholding to the cropped volume
-    binary_cropped = sauvola_thresholding(binary_cropped, window_size=sauvola_radius, k=sauvola_k)
-    #undo the swap axes
-    binary_cropped = np.swapaxes(binary_cropped, 0, 2)
-
-    print(binary_cropped.max())
+    binary_cropped = sauvola_thresholding(cropped_volume, window_size=sauvola_radius, k=sauvola_k)
 
     #set to zero all the slices before the front wall and after the back wall
     if frontwall > 0:
