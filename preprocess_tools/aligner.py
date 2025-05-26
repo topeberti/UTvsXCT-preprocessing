@@ -261,7 +261,7 @@ def crop_walls(volume, mask = None):
 
     if mask is None:
         # Generate mask identifying material voxels in the original volume
-        mask = onlypores.material_mask_parallel(volume)
+        mask = onlypores.material_mask(volume)
 
     # Find the front wall (first stable slice with material)
     front_wall_index = find_frontwall(mask)
@@ -290,13 +290,13 @@ def main(volume,crop = False, order = 3, cval = 40):
         volume (numpy.ndarray): Aligned and cropped volume.
     """
     # Generate mask identifying material voxels in the original volume
-    mask = onlypores.material_mask_parallel(volume)
+    mask = onlypores.material_mask(volume)
 
     # Align the volume so principal axes match coordinate axes
     volume = align_volume_xyz(volume, mask, order, cval)
 
     # Generate a new mask for the aligned volume
-    mask = onlypores.material_mask_parallel(volume)
+    mask = onlypores.material_mask(volume)
 
     volume,mask = centering(volume,mask)
 

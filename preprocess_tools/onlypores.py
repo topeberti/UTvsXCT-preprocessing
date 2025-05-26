@@ -183,9 +183,9 @@ def onlypores(xct, frontwall = 0, backwall = 0, sauvola_radius = 30, sauvola_k =
     
     return onlypores, sample_mask, binary
 
-def material_mask(xct): #Material mask but not parallel
+def material_mask_parallel(xct):
     """
-    Generate a material mask for a 3D volume.
+    Generate a material mask for a 3D volume using parallel processing.
 
     Parameters:
     - xct: 3D numpy array - Input volume
@@ -193,7 +193,47 @@ def material_mask(xct): #Material mask but not parallel
     Returns:
     - sample_mask: 3D binary numpy array - Material mask
     """
-    
+
+    # Function to apply Otsu thresholding and process each chunk
+    def process_chunk(xct_chunk):
+        threshold_value = filters.threshold_otsu(xct_chunk)
+        binary = xct_chunk > threshold_value
+        max_proj = np.max(binary, axis=0)
+        labels = measure.label(max_proj)
+        props = regionprops(labels)
+        minr, minc, maxr, maxc = props[0].bbox
+        binary_cropped = binary[:, minr:maxr, minc:maxc]
+        sample_mask_cropped = fill_voids.fill(binary_cropped, in_place=False)
+        sample_mask = np.zeros_like(binary)
+        sample_mask[:, minr:maxr, minc:maxc] = sample_mask_cropped
+        return sample_mask
+
+    print('computing otsu')
+
+    # Number of chunks (adjust depending on the size of your array and available cores)
+    num_chunks = 16  # You can increase or decrease this based on testing
+
+    # Assuming xct is your large array, divide it into chunks
+    chunks = np.array_split(xct, num_chunks)
+
+    # Use joblib to apply the function in parallel
+    sample_masks = Parallel(n_jobs=-1, backend='loky')(delayed(process_chunk)(chunk) for chunk in chunks)
+
+    # Combine the results back into a single array
+    sample_mask = np.concatenate(sample_masks, axis=0)
+
+    return sample_mask
+
+def material_mask_nonconcurrent(xct):
+    """
+    Generate a material mask for a 3D volume (not parallel).
+
+    Parameters:
+    - xct: 3D numpy array - Input volume
+
+    Returns:
+    - sample_mask: 3D binary numpy array - Material mask
+    """
     threshold_value = filters.threshold_otsu(xct)
     binary = xct > threshold_value
     max_proj = np.max(binary, axis=0)
@@ -204,5 +244,23 @@ def material_mask(xct): #Material mask but not parallel
     sample_mask_cropped = fill_voids.fill(binary_cropped, in_place=False)
     sample_mask = np.zeros_like(binary)
     sample_mask[:, minr:maxr, minc:maxc] = sample_mask_cropped
-
     return sample_mask
+
+def material_mask(xct):
+    """
+    Generate a material mask for a 3D volume, automatically choosing parallel or non-parallel
+    implementation based on available system memory.
+
+    Parameters:
+    - xct: 3D numpy array - Input volume
+
+    Returns:
+    - sample_mask: 3D binary numpy array - Material mask
+    """
+    # Estimate memory required for parallel processing (rough estimate: 2x input size)
+    required_mem_bytes = xct.nbytes * 2
+    available_mem_bytes = psutil.virtual_memory().available
+    if available_mem_bytes > required_mem_bytes:
+        return material_mask_parallel(xct)
+    else:
+        return material_mask_nonconcurrent(xct)
