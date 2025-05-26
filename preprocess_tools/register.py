@@ -30,6 +30,15 @@ def frontwall_orientation(volume, compare_axis, reference_axis='Z'):
 
     # Mapeo de nombres a índices
     axis_map = {'Z': 0, 'Y': 1, 'X': 2}
+
+    """La idea del mapeo esta bien pero es mejor que los ejes se traten desde el principio como 0,1,2.
+        Es menos intuitivo de cara a nosotros dos que sabemos que Z es 0, Y es 1 y X es 2, pero es más fácil de entender para el código.
+        Además, así no hay que hacer el mapeo de nombres a índices.
+
+        Si alguien quiere usar esta funcion con un volumen que tiene el sistema de ejes cambaido seria un lio para entenderlo si no estan en 0,1,2.
+
+        Asique que en la funcion entren los ejes como 0,1,2 desde el principio aunque como comentario quieras explicar cual es cual para ti.
+    """
     
     reference_axis = reference_axis.upper()
     compare_axis = compare_axis.upper()
@@ -65,3 +74,5 @@ def frontwall_orientation(volume, compare_axis, reference_axis='Z'):
     angle = compute_angle(volume, collapse_axis)
 
     return angle
+
+""" Cuando acabes la funcion, dile a copilot o a chatgpt lo siguiente: Please properly comment and document this code."""
