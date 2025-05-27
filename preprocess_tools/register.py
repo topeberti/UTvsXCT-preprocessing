@@ -43,31 +43,50 @@ def frontwall_orientation(volume, reference_axis, compare_axis):
     # Determine the axis along which to collapse the volume to get the 2D projection
     collapse_axis = list({0, 1, 2} - {reference_axis, compare_axis})[0]
 
-    def compute_angle(volume, collapse_axis):
-        # Project the volume by taking the maximum intensity along the collapse axis
-        b_scan = np.max(volume, axis=collapse_axis)
-
-        # Create a binary mask to isolate strong signal regions (e.g., wall)
-        mask = (b_scan > 100).astype(np.uint8) * 255
-
-        # Apply the mask to the B-scan to isolate meaningful pixels
-        bscan_uint8 = b_scan.astype(np.uint8)
-        bscan_masked = cv2.bitwise_and(bscan_uint8, bscan_uint8, mask=mask)
-
-        # Find coordinates of non-zero pixels in the masked B-scan
-        ys, xs = np.where(bscan_masked > 0)
-
-        # If not enough points are found, angle estimation is not possible
-        if len(xs) < 2:
-            return None
-
-        # Fit a line y = m*x + b using least squares regression
-        A = np.vstack([xs, np.ones_like(xs)]).T
-        m, _ = np.linalg.lstsq(A, ys, rcond=None)[0]
-
-        # Convert the slope to degrees
-        return np.degrees(np.arctan(m))
-
     # Compute and return the inclination angle
     angle = compute_angle(volume, collapse_axis)
     return angle
+
+def compute_angle(volume, collapse_axis):
+    """
+    Compute the inclination angle of a prominent structure (e.g., wall) in a 3D volume by projecting it onto a 2D plane and fitting a line.
+
+    This function projects the input 3D volume onto a 2D plane by taking the maximum intensity along the specified axis (collapse_axis),
+    then isolates strong signal regions using a binary mask. It fits a straight line to the coordinates of the masked region using least
+    squares regression and returns the inclination angle of this line in degrees.
+
+    Parameters
+    ----------
+    volume : numpy.ndarray
+        3D numpy array representing the volumetric data (e.g., shape (Z, Y, X)).
+    collapse_axis : int
+        The axis along which to collapse the volume to obtain a 2D projection (0, 1, or 2).
+
+    Returns
+    -------
+    angle_deg : float or None
+        The estimated inclination angle (in degrees) of the structure in the projected 2D plane. Returns None if insufficient points are found.
+    """
+    # Project the volume by taking the maximum intensity along the collapse axis
+    b_scan = np.max(volume, axis=collapse_axis)
+
+    # Create a binary mask to isolate strong signal regions (e.g., wall)
+    mask = (b_scan > 100).astype(np.uint8) * 255
+
+    # Convert the B-scan to uint8 and apply the mask to isolate meaningful pixels
+    bscan_uint8 = b_scan.astype(np.uint8)
+    bscan_masked = cv2.bitwise_and(bscan_uint8, bscan_uint8, mask=mask)
+
+    # Find coordinates of non-zero pixels in the masked B-scan
+    ys, xs = np.where(bscan_masked > 0)
+
+    # If not enough points are found, angle estimation is not possible
+    if len(xs) < 2:
+        return None
+
+    # Fit a line y = m*x + b using least squares regression
+    A = np.vstack([xs, np.ones_like(xs)]).T
+    m, _ = np.linalg.lstsq(A, ys, rcond=None)[0]
+
+    # Convert the slope to degrees
+    return np.degrees(np.arctan(m))
