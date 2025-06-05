@@ -6,7 +6,7 @@ from scipy.ndimage import binary_fill_holes
 from joblib import Parallel, delayed
 from skimage.measure import label, regionprops
 
-def process_volume(volume, n_samples):
+def split_volume(volume, n_samples):
     """
     Process the volume to extract sample volumes.
 
