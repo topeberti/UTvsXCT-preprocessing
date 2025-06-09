@@ -1,12 +1,10 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from tqdm import tqdm
 from skimage.filters import threshold_otsu
 from scipy.ndimage import binary_fill_holes
 from joblib import Parallel, delayed
 from skimage.measure import label, regionprops
 
-def split_volume(volume, n_samples):
+def isolate_samples(volume, n_samples):
     """
     Process the volume to extract sample volumes.
 
@@ -30,7 +28,7 @@ def split_volume(volume, n_samples):
 
     # Step 3: Use parallel processing to fill holes in all slices for efficiency
     filled_slices = Parallel(n_jobs=-1)(
-        delayed(process_slice)(i) for i in tqdm(range(binary.shape[0]))
+        delayed(process_slice)(i) for i in range(binary.shape[0])
     )
 
     # Step 4: Combine the processed slices back into a 3D volume
@@ -59,7 +57,7 @@ def split_volume(volume, n_samples):
     # Step 8: Extract the n_samples largest samples in parallel
     volumes = Parallel(n_jobs=-1)(
         delayed(process_sample)(volume, label_image, props[i].label, props[i].bbox)
-        for i in tqdm(range(n_samples))
+        for i in range(n_samples)
     )
 
     # Step 9: Collect bounding boxes for sorting
