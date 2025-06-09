@@ -272,38 +272,55 @@ def crop_walls(volume, mask = None):
     # Return the aligned volume cropped to start at the front wall and end at the back wall
     return volume[:,:,front_wall_index:back_wall_index], front_wall_index, back_wall_index
 
-def main(volume,crop = False, order = 3, cval = 40):
+def main(volume, crop=False, order=3, cval=-1):
     """
-    Main function that processes a 3D volume:
-    1. Generates a material mask
-    2. Aligns the volume to principal axes
-    3. Finds the front wall
-    4. Returns the aligned volume cropped (if crop = True) to start at the front wall
+    Main processing function that aligns a 3D volume to its principal axes and optionally crops it.
+    
+    This function performs the following operations in sequence:
+    1. Determines appropriate fill value (cval) for regions outside input volume if not provided
+    2. Generates a binary mask to identify material regions in the volume
+    3. Aligns the volume using PCA so principal axes of the object match coordinate axes
+    4. Regenerates the material mask for the aligned volume
+    5. Centers the volume by cropping to the bounding box of the material
+    6. Optionally crops the volume to remove non-material regions at front and back
     
     Args:
-        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z).
-        crop (bool): If True, crop the volume to start at the front wall.
-        order (int): Interpolation order for affine transformation (default is 3).
-        cval (int): Fill value for regions outside the input volume (default is 40).
+        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z) to be processed.
+        crop (bool): If True, crop the volume to remove non-material regions at front/back walls.
+                    If False, only alignment and centering are performed.
+        order (int): Interpolation order for the affine transformation:
+                    0: Nearest-neighbor (fastest, lowest quality)
+                    1: Linear interpolation
+                    3: Cubic interpolation (slower, higher quality)
+        cval (int): Fill value for regions outside the input volume after transformation.
+                    If set to -1 (default), the minimum value from the center slice is used.
         
     Returns:
-        volume (numpy.ndarray): Aligned and cropped volume.
+        numpy.ndarray: Processed volume (aligned, centered, and optionally cropped)
     """
-    # Generate mask identifying material voxels in the original volume
+    
+    # Determine appropriate fill value if not explicitly provided
+    if cval == -1:
+        # Use minimum value from central slice as background fill value
+        cval = volume[volume.shape[0] // 2, volume.shape[1] // 2].min()
+
+    # Generate binary mask identifying material voxels in the original volume
     mask = onlypores.material_mask(volume)
 
-    # Align the volume so principal axes match coordinate axes
+    # Align the volume so principal axes match coordinate axes (PCA-based alignment)
     volume = align_volume_xyz(volume, mask, order, cval)
 
-    # Generate a new mask for the aligned volume
+    # Generate a new mask for the aligned volume (needed since volume geometry changed)
     mask = onlypores.material_mask(volume)
 
-    volume,mask = centering(volume,mask)
+    # Center the volume by cropping to the bounding box of the material
+    volume, mask = centering(volume, mask)
 
+    # Return the centered volume if cropping is not requested
     if not crop:
-
         return volume
     
-    volume,_,_ = crop_walls(volume,mask)
+    # Crop the volume to remove non-material regions at front and back walls
+    volume, _, _ = crop_walls(volume, mask)
     
     return volume

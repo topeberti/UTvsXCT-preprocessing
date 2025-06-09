@@ -66,5 +66,10 @@ def isolate_samples(volume, n_samples):
     # Step 10: Order the samples by their position along the z-axis (bbox[2])
     volumes = [v for _, v in sorted(zip(bboxes, volumes), key=lambda pair: pair[0][2])]
 
-    # Step 11: Return the list of extracted sample volumes
+    # Step 12: Replace all the pixels with value 0 with the minimum value of the center slice of the original volume
+    center_value = volume[volume.shape[0] // 2, volume.shape[1] // 2].min()
+    for i in range(len(volumes)):
+        volumes[i][volumes[i] == 0] = center_value
+
+    # Step 13: Return the list of extracted sample volumes
     return volumes
