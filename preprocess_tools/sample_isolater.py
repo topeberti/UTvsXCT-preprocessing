@@ -44,12 +44,13 @@ def isolate_samples(volume, n_samples):
     # Step 7: Sort the regions by area in descending order (largest samples first)
     props.sort(key=lambda x: x.area, reverse=True)
 
+    minimum_value = volume[volume.shape[0] // 2, volume.shape[1] // 2].min()
+
     def process_sample(volume, label_image, label, bbox):
         # Extract a single sample from the original volume using its label and bounding box
         sample = volume.copy()
-        # Set all voxels outside the current label to the minimum value in the center slice (background)
-        value = sample[sample.shape[0] // 2, sample.shape[1] // 2].min()
-        sample[label_image != label] = value
+        # Set all voxels outside the current label to the minimum value of the middle of the volume (background)
+        sample[label_image != label] = minimum_value
         # Crop the sample to its bounding box
         sample = sample[bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5]]
         return sample
@@ -66,10 +67,5 @@ def isolate_samples(volume, n_samples):
     # Step 10: Order the samples by their position along the z-axis (bbox[2])
     volumes = [v for _, v in sorted(zip(bboxes, volumes), key=lambda pair: pair[0][2])]
 
-    # Step 12: Replace all the pixels with value 0 with the minimum value of the center slice of the original volume
-    center_value = volume[volume.shape[0] // 2, volume.shape[1] // 2].min()
-    for i in range(len(volumes)):
-        volumes[i][volumes[i] == 0] = center_value
-
-    # Step 13: Return the list of extracted sample volumes
+    # Step 12: Return the list of extracted sample volumes
     return volumes
