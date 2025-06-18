@@ -3,6 +3,8 @@ import numpy as np                      # For numerical operations and array man
 from . import onlypores                # Custom module for material segmentation
 from scipy.ndimage import affine_transform, rotate  # For geometric transformations
 from skimage.restoration import estimate_sigma      # For noise estimation
+from joblib import Parallel, delayed    # For parallel processing
+from tqdm import tqdm                   # For progress bars
 
 def align_volume_xyz(volume, mask, order = 3, cval = 40):
     """
@@ -307,3 +309,117 @@ def main(volume,crop = False, order = 3, cval = 40):
     volume,_,_ = crop_walls(volume,mask)
     
     return volume
+
+def rotate_volume_axis(volume, axis, angle, n_jobs=-1, cval=40, parallel=True):
+    """
+    Rotate a 3D volume around a specified axis using parallel or sequential processing.
+    
+    Parameters
+    ----------
+    volume : numpy.ndarray
+        3D volume to be rotated, expected shape (Z, Y, X).
+    axis : str
+        Axis to rotate around. Must be one of 'x', 'y', or 'z'.
+    angle : float
+        Angle in degrees to rotate around the specified axis.
+    n_jobs : int, default=-1
+        Number of jobs for parallel processing. -1 means using all processors.
+        Only used when parallel=True.
+    cval : int, default=40
+        Fill value for regions outside the input volume.
+    parallel : bool, default=True
+        Whether to process slices in parallel (True) or sequentially (False).
+        
+    Returns
+    -------
+    rotated_volume : numpy.ndarray
+        Rotated 3D volume with the same dtype as the input volume.
+    """
+    if angle == 0:
+        return volume.copy()
+    
+    # Validate axis parameter
+    axis = axis.lower()
+    if axis not in ['x', 'y', 'z']:
+        raise ValueError("Axis must be one of 'x', 'y', or 'z'")
+    
+    # Define helper functions for each rotation axis
+    def rotate_around_x(i, vol, angle):
+        # Rotating YZ plane (around X axis)
+        return rotate(vol[:,:,i], angle=angle, reshape=True, cval=cval)
+    
+    def rotate_around_y(i, vol, angle):
+        # Rotating XZ plane (around Y axis)
+        return rotate(vol[:,i,:], angle=angle, reshape=True, cval=cval)
+    
+    def rotate_around_z(i, vol, angle):
+        # Rotating XY plane (around Z axis)
+        return rotate(vol[i,:,:], angle=angle, reshape=True, cval=cval)
+      # Set up rotation based on axis
+    if axis == 'x':
+        # Rotating around X axis (YZ plane)
+        # Calculate new shape after rotation
+        new_shape = rotate(volume[:,:,0], angle=angle, reshape=True, cval=cval).shape
+        
+        # Process slices in parallel or sequentially
+        if parallel:
+            rotated_slices = Parallel(n_jobs=n_jobs)(
+                delayed(rotate_around_x)(i, volume, angle) 
+                for i in tqdm(range(volume.shape[2]), desc=f"Rotating around {axis}-axis")
+            )
+        else:
+            rotated_slices = []
+            for i in tqdm(range(volume.shape[2]), desc=f"Rotating around {axis}-axis"):
+                rotated_slices.append(rotate_around_x(i, volume, angle))
+        
+        # Construct the rotated volume
+        rotated_volume = np.zeros((new_shape[0], new_shape[1], volume.shape[2]), dtype=volume.dtype)
+        for i, rotated_slice in enumerate(rotated_slices):
+            rotated_volume[:,:,i] = rotated_slice
+            
+    elif axis == 'y':
+        # Rotating around Y axis (XZ plane)
+        # Calculate new shape after rotation
+        new_shape = rotate(volume[:,0,:], angle=angle, reshape=True, cval=cval).shape
+        
+        # Process slices in parallel or sequentially
+        if parallel:
+            rotated_slices = Parallel(n_jobs=n_jobs)(
+                delayed(rotate_around_y)(i, volume, angle) 
+                for i in tqdm(range(volume.shape[1]), desc=f"Rotating around {axis}-axis")
+            )
+        else:
+            rotated_slices = []
+            for i in tqdm(range(volume.shape[1]), desc=f"Rotating around {axis}-axis"):
+                rotated_slices.append(rotate_around_y(i, volume, angle))
+        
+        # Construct the rotated volume
+        rotated_volume = np.zeros((new_shape[0], volume.shape[1], new_shape[1]), dtype=volume.dtype)
+        for i, rotated_slice in enumerate(rotated_slices):
+            rotated_volume[:,i,:] = rotated_slice
+            
+    else:  # axis == 'z'
+        # Rotating around Z axis (XY plane)
+        # Calculate new shape after rotation
+        new_shape = rotate(volume[0,:,:], angle=angle, reshape=True, cval=cval).shape
+        
+        # Process slices in parallel or sequentially
+        if parallel:
+            rotated_slices = Parallel(n_jobs=n_jobs)(
+                delayed(rotate_around_z)(i, volume, angle) 
+                for i in tqdm(range(volume.shape[0]), desc=f"Rotating around {axis}-axis")
+            )
+        else:
+            rotated_slices = []
+            for i in tqdm(range(volume.shape[0]), desc=f"Rotating around {axis}-axis"):
+                rotated_slices.append(rotate_around_z(i, volume, angle))
+        
+        # Construct the rotated volume
+        rotated_volume = np.zeros((volume.shape[0], new_shape[0], new_shape[1]), dtype=volume.dtype)
+        
+        # Construct the rotated volume
+        rotated_volume = np.zeros((volume.shape[0], new_shape[0], new_shape[1]), dtype=volume.dtype)
+        for i, rotated_slice in enumerate(rotated_slices):
+            rotated_volume[i,:,:] = rotated_slice
+    
+    return rotated_volume
