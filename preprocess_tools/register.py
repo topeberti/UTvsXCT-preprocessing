@@ -4,103 +4,6 @@ from scipy.ndimage import rotate
 from scipy.signal import find_peaks
 from tqdm import tqdm  # Progress bar for long operations
 
-
-def angles_estimation(volume):
-    """
-    Estimate the front wall orientation from a 3D ultrasound or XCT volume.
-
-    This function processes a 3D volume to estimate the orientation 
-    of the front wall (typically the first strong reflector surface) in two 
-    orthogonal planes: YZ and XZ. This is useful for determining the tilt
-    of the sample surface relative to the scanning axes.
-
-    Parameters
-    ----------
-    volume : numpy.ndarray
-        3D ultrasound volume with shape (Z, Y, X), where:
-        - Z is the depth or scan axis,
-        - Y is the vertical axis (height),
-        - X is the horizontal axis (width).
-        
-        It is essential that the volume follows this axis order (Z, Y, X)
-        for the orientation angles to be computed correctly.
-
-    Returns
-    -------
-    angle_deg_YZ : float or None
-        Estimated angle in degrees of the front wall in the YZ plane (depth vs height).
-        Returns None if insufficient points are found to estimate the angle.
-
-    angle_deg_XZ : float or None
-        Estimated angle in degrees of the front wall in the XZ plane (depth vs width).
-        Returns None if insufficient points are found to estimate the angle.
-
-    Notes
-    -----
-    The function projects the volume onto the YZ and XZ planes using maximum intensity 
-    projection along the X and Y axes, respectively. It then uses a least squares fit 
-    to estimate the angle of the front wall in each plane.
-
-    The threshold value (100) is used to create a binary mask that isolates
-    the front wall from background noise.
-    """
-    # --- YZ plane processing ---
-    # Create maximum intensity projection along X axis to get YZ plane view
-    b_scan_yz = np.max(volume, axis=2)  # collapse X axis
-    
-    # Create binary mask of strong reflectors (values > 100)
-    mask_yz = (b_scan_yz > 100).astype(np.uint8) * 255
-    
-    # Convert to uint8 for OpenCV operations
-    bscan_yz_uint8 = b_scan_yz.astype(np.uint8)
-    
-    # Apply mask to original projection
-    bscan_mask_yz = cv2.bitwise_and(bscan_yz_uint8, bscan_yz_uint8, mask=mask_yz)
-
-    # Get coordinates of non-zero points (the front wall)
-    ys, xs = np.where(bscan_mask_yz > 0)
-    
-    # Check if we have enough points to estimate an angle
-    if len(xs) < 2:
-        angle_deg_YZ = None
-    else:
-        # Perform least squares fit to estimate the line y = m*x + c
-        A = np.vstack([xs, np.ones_like(xs)]).T
-        m, _ = np.linalg.lstsq(A, ys, rcond=None)[0]
-        
-        # Convert slope to angle in degrees
-        angle_deg_YZ = np.degrees(np.arctan(m))
-
-    # --- XZ plane processing ---
-    # Create maximum intensity projection along Y axis to get XZ plane view
-    b_scan_xz = np.max(volume, axis=1)  # collapse Y axis
-    
-    # Create binary mask of strong reflectors (values > 100)
-    mask_xz = (b_scan_xz > 100).astype(np.uint8) * 255
-    
-    # Convert to uint8 for OpenCV operations
-    bscan_xz_uint8 = b_scan_xz.astype(np.uint8)
-    
-    # Apply mask to original projection
-    bscan_mask_xz = cv2.bitwise_and(bscan_xz_uint8, bscan_xz_uint8, mask=mask_xz)
-
-    # Get coordinates of non-zero points (the front wall)
-    ys, xs = np.where(bscan_mask_xz > 0)
-    
-    # Check if we have enough points to estimate an angle
-    if len(xs) < 2:
-        angle_deg_XZ = None
-    else:
-        # Perform least squares fit to estimate the line y = m*x + c
-        A = np.vstack([xs, np.ones_like(xs)]).T
-        m, _ = np.linalg.lstsq(A, ys, rcond=None)[0]
-        
-        # Convert slope to angle in degrees
-        angle_deg_XZ = np.degrees(np.arctan(m))
-
-    return angle_deg_YZ, angle_deg_XZ
-
-
 def rotate_volume(volume):
     """
     Rotates a 3D volume to align it based on estimated angles.
@@ -129,7 +32,7 @@ def rotate_volume(volume):
     """
     # Step 1: Rotate volume in the YZ Plane (around X axis)
     # Estimate the angle needed to align the volume in the YZ plane
-    angle_YZ, _ = angles_estimation(volume)
+    angle_YZ, _ = YZ_XZ_inclination(volume)
     
     # Perform the rotation around the X axis (axes 0 and 1 correspond to Z and Y dimensions)
     # Note: reshape=False keeps the dimensions consistent
