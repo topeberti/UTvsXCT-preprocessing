@@ -1,6 +1,11 @@
 import numpy as np
 import cv2
 from scipy.ndimage import rotate
+import numpy as np
+import cv2
+from scipy.ndimage import rotate
+from scipy.signal import find_peaks
+from tqdm import tqdm
 
 
 def angles_estimation(volume):
@@ -96,3 +101,191 @@ def rotate_volume(volume):
     rotated_volume = rotate(volume_YZ, angle=angle_XZ, axes=(0, 2), reshape=False)
 
     return rotated_volume
+
+
+def UT_surface_coordinates(volume_UT, signal_percentage=1.0):
+    """
+    Extracts the surface coordinates from an Ultrasound (UT) volume.
+
+    For each (x, y) column in the volume, it takes the A-scan (signal along z),
+    finds the maximum value, and keeps it only if it exceeds a threshold.
+    Returns the coordinates (z, y, x) of the surface points.
+
+    Parameters:
+        volume_UT (numpy.ndarray): 3D UT volume (z, y, x)
+        signal_percentage (float): Percentage of the signal depth to process (0.0 to 1.0).
+                                  For example, if 0.5, only the first 50% of the signal 
+                                  along the z-axis will be processed. Default is 1.0 (100%).
+
+    Returns:
+        numpy.ndarray: Array of surface points (z, y, x)
+    """
+    threshold = 60  # Minimum amplitude to consider as surface
+    y_max = volume_UT.shape[1]
+    x_max = volume_UT.shape[2]
+    
+    # Calculate the maximum z-index to consider based on the percentage
+    z_max = volume_UT.shape[0]
+    z_limit = int(z_max * signal_percentage)
+    
+    surface_coords = []  # List to store (z, y, x) surface coordinates
+
+    # Loop over each x-y location in the volume
+    for x in range(x_max):
+        for y in range(y_max):
+            A_scan = volume_UT[:z_limit, y, x]  # Signal along z-axis up to z_limit
+            max_val = np.max(A_scan)     # Maximum value in the signal
+
+            # If the max value is above the threshold, store the index
+            if max_val > threshold:
+                z = np.argmax(A_scan)    # Position of the max value
+                surface_coords.append((z, y, x))
+
+    if not surface_coords:
+        raise ValueError("No surface points found above the threshold.")
+
+    return np.array(surface_coords)
+
+def XCT_surface_coordinates(volume_XCT, signal_percentage=1.0):
+    """
+    Extracts the surface coordinates from a X-ray CT (XCT) volume.
+
+    For each (x, y) column in the volume, it finds the first peak in the 
+    signal along z that exceeds a fixed threshold. This peak is considered 
+    the surface point.
+
+    Parameters:
+        volume_XCT (numpy.ndarray): 3D XCT volume (z, y, x)
+        signal_percentage (float): Percentage of the signal depth to process (0.0 to 1.0).
+                                  For example, if 0.5, only the first 50% of the signal 
+                                  along the z-axis will be processed. Default is 1.0 (100%).
+
+    Returns:
+        numpy.ndarray: Array of surface points (z, y, x)
+    """
+    threshold = 175      # Minimum peak height to be considered
+    
+    # Calculate the maximum z-index to consider based on the percentage
+    z_max = volume_XCT.shape[0]
+    z_limit = int(z_max * signal_percentage)
+    
+    # Pre-compute the mask of columns that have values above threshold
+    # Only consider the portion of the volume up to z_limit
+    max_along_z = np.max(volume_XCT[:z_limit], axis=0)  # Shape: (y_max, x_max)
+    valid_columns = max_along_z >= threshold
+    
+    # Get coordinates of valid columns
+    y_coords, x_coords = np.where(valid_columns)
+    
+    # Initialize array to store first peak z-coordinate for each valid column
+    surface_coords = []
+    
+    # Process only the valid columns
+    for i in tqdm(range(len(y_coords)), desc="Finding surface points"):
+        y, x = y_coords[i], x_coords[i]
+        signal = volume_XCT[:z_limit, y, x]  # Only process up to z_limit
+        
+        # Find the first peak above threshold
+        peaks, _ = find_peaks(signal, height=threshold)
+        
+        if len(peaks) > 0:
+            z = peaks[0]
+            surface_coords.append((z, y, x))
+    if not surface_coords:
+        raise ValueError("No surface points found above the threshold (175).")
+        
+    return np.array(surface_coords)
+
+from preprocess_tools.onlypores import material_mask
+
+def XCT_surface_coordinates_2(volume_XCT, signal_percentage=1.0):
+    """
+    Extracts the surface coordinates from a X-ray CT (XCT) volume.
+
+    For each (x, y) column in the volume, it finds the first peak in the 
+    signal along z that exceeds a fixed threshold. This peak is considered 
+    the surface point.
+
+    Parameters:
+        volume_XCT (numpy.ndarray): 3D XCT volume (z, y, x)
+        signal_percentage (float): Percentage of the signal depth to process (0.0 to 1.0).
+                                  For example, if 0.5, only the first 50% of the signal 
+                                  along the z-axis will be processed. Default is 1.0 (100%).
+
+    Returns:
+        numpy.ndarray: Array of surface points (z, y, x)
+    """
+
+     # Calculate the maximum z-index to consider based on the percentage
+    z_max = volume_XCT.shape[0]
+    z_limit = int(z_max * signal_percentage)
+
+    xct_mask = material_mask(volume_XCT)
+
+    xct_mask = xct_mask[:z_limit, :, :]  # Take only the first percentage of the volume
+
+    threshold = 175
+    max_along_z = np.max(volume_XCT[:z_limit], axis=0)  # Shape: (y_max, x_max)
+    valid_columns = max_along_z >= threshold
+
+    # Get coordinates of valid columns
+    y_coords, x_coords = np.where(valid_columns)
+    
+    # Initialize array to store first peak z-coordinate for each valid column
+    surface_coords = []
+    
+    # Process only the valid columns
+    for i in tqdm(range(len(y_coords)), desc="Finding surface points"):
+        y, x = y_coords[i], x_coords[i]
+        signal = volume_XCT[:z_limit, y, x]  # Only process up to z_limit
+        
+        # Find the first nonzero pixel in the signal
+        z = np.argmax(signal > 0)
+
+        surface_coords.append((z, y, x))
+        
+    return np.array(surface_coords)
+    
+
+def YZ_XZ_inclination(volume, volumeType='XCT', signal_percentage=1.0):
+    """
+    Calculates the inclination of the surface in a 3D volume with respect to
+    the YZ and XZ planes by fitting a plane to the extracted surface points.
+
+    Depending on the volumeType ('XCT' or 'UT'), it calls the appropriate
+    surface extraction function, fits a plane z = ax + by + c, and computes
+    the tilt angles from the plane coefficients.
+
+    Parameters:
+        volume (numpy.ndarray): 3D image volume (z, y, x)
+        volumeType (str): 'XCT' for CT scan, 'UT' for ultrasound
+        signal_percentage (float): Percentage of signal depth to process for both UT and XCT.
+                                  Default is 1.0 (100%).
+
+    Returns:
+        tuple: (angle_yz, angle_xz) in degrees
+    """
+
+    # Choose appropriate method based on volume type
+    if volumeType == 'UT':
+        surface_coords = UT_surface_coordinates(volume, signal_percentage)
+    elif volumeType == 'XCT':
+        surface_coords = XCT_surface_coordinates(volume, signal_percentage)
+    else:
+        raise ValueError("volumeType must be either 'XCT' or 'UT'")
+
+    # Extract Z (depth), Y (height), and X (width) coordinates
+    Z = surface_coords[:, 0]
+    Y = surface_coords[:, 1]
+    X = surface_coords[:, 2]
+
+    # Fit a plane z = ax + by + c using least squares
+    A = np.c_[X, Y, np.ones_like(X)]
+    C, _, _, _ = np.linalg.lstsq(A, Z, rcond=None)
+    a, b, c = C  # Plane coefficients
+
+    # Compute inclination angles in degrees
+    angle_yz = np.degrees(np.arctan(b))  # Tilt relative to YZ plane
+    angle_xz = np.degrees(np.arctan(a))  # Tilt relative to XZ plane
+
+    return angle_yz, angle_xz  # Return tilt angles

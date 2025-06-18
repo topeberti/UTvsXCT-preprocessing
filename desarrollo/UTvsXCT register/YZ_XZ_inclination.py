@@ -85,7 +85,6 @@ def XCT_surface_coordinates(volume_XCT):
     return np.array(surface_coords)
 
 
-
 def YZ_XZ_inclination(volume, volumeType='XCT'):
     """
     Calculates the inclination of the surface in a 3D volume with respect to
