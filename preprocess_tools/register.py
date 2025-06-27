@@ -4,50 +4,6 @@ from scipy.ndimage import rotate
 from scipy.signal import find_peaks
 from tqdm import tqdm  # Progress bar for long operations
 
-def rotate_volume(volume):
-    """
-    Rotates a 3D volume to align it based on estimated angles.
-
-    This function aligns a 3D volume by performing sequential rotations to correct
-    the orientation of the front wall surface. The process happens in two steps:
-    1. First rotation in the YZ plane (around the X axis)
-    2. Second rotation in the XZ plane (around the Y axis) on the already rotated volume
-
-    Parameters
-    ----------
-    volume : numpy.ndarray
-        3D array representing the volume to be rotated, with shape (Z, Y, X).
-
-    Returns
-    -------
-    numpy.ndarray
-        The rotated 3D volume with the same shape as the input volume but aligned
-        so that the front wall is perpendicular to the Z axis.
-
-    Notes
-    -----
-    The function uses the angles_estimation function from this module to determine
-    the rotation angles. The reshape=False parameter in the rotate function ensures
-    that the output volume has the same dimensions as the input.
-    """
-    # Step 1: Rotate volume in the YZ Plane (around X axis)
-    # Estimate the angle needed to align the volume in the YZ plane
-    angle_YZ, _ = YZ_XZ_inclination(volume)
-    
-    # Perform the rotation around the X axis (axes 0 and 1 correspond to Z and Y dimensions)
-    # Note: reshape=False keeps the dimensions consistent
-    volume_YZ = rotate(volume, angle=angle_YZ, axes=(0, 1), reshape=False)
-
-    # Step 2: Rotate volume in the XZ Plane (around Y axis)
-    # Estimate the angle needed to align the volume in the XZ plane from the already rotated volume
-    _, angle_XZ = angles_estimation(volume_YZ)
-    
-    # Perform the rotation around the Y axis (axes 0 and 2 correspond to Z and X dimensions)
-    rotated_volume = rotate(volume_YZ, angle=angle_XZ, axes=(0, 2), reshape=False)
-
-    return rotated_volume
-
-
 def UT_surface_coordinates(volume_UT, signal_percentage=1.0):
     """
     Extracts the surface coordinates from an Ultrasound (UT) volume.

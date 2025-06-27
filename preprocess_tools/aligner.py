@@ -1,6 +1,6 @@
 # Import necessary libraries
 import numpy as np                      # For numerical operations and array manipulations
-from . import onlypores                # Custom module for material segmentation
+from . import onlypores, register ,reslicer               # Custom module for material segmentation
 from scipy.ndimage import affine_transform, rotate  # For geometric transformations
 from skimage.restoration import estimate_sigma      # For noise estimation
 from joblib import Parallel, delayed    # For parallel processing
@@ -100,6 +100,27 @@ def align_volume_xyz(volume, mask, order = 3, cval = 40):
     )
     
     return aligned_volume.astype(np.uint8)
+
+def align_volume_xy(volume,parallel=True,cval=40):
+    """
+    Aligns a 3D volume such that the XY plane is aligned with the principal axes.
+    
+    Args:
+        volume (numpy.ndarray): 3D uint8 volume with axes (z,y,x).
+        
+    Returns:
+        numpy.ndarray: Aligned volume (uint8) (z,y,x)
+    """
+
+    angle_yz, angle_xz = register.YZ_XZ_inclination(volume,'XCT')
+
+    # Rotate around Y axis to align YZ plane
+    volume = rotate_volume_axis(volume, 'x', angle_yz, n_jobs=-1, cval=cval, parallel=parallel)
+    # Rotate around X axis to align XZ plane
+    volume = rotate_volume_axis(volume, 'y', angle_xz, n_jobs=-1, cval=cval, parallel=parallel)
+
+    return volume
+
 
 def measure_noise_skimage(image):
     """
@@ -274,59 +295,6 @@ def crop_walls(volume, mask = None):
     # Return the aligned volume cropped to start at the front wall and end at the back wall
     return volume[:,:,front_wall_index:back_wall_index], front_wall_index, back_wall_index
 
-def main(volume, crop=False, order=3, cval=-1):
-    """
-    Main processing function that aligns a 3D volume to its principal axes and optionally crops it.
-    
-    This function performs the following operations in sequence:
-    1. Determines appropriate fill value (cval) for regions outside input volume if not provided
-    2. Generates a binary mask to identify material regions in the volume
-    3. Aligns the volume using PCA so principal axes of the object match coordinate axes
-    4. Regenerates the material mask for the aligned volume
-    5. Centers the volume by cropping to the bounding box of the material
-    6. Optionally crops the volume to remove non-material regions at front and back
-    
-    Args:
-        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z) to be processed.
-        crop (bool): If True, crop the volume to remove non-material regions at front/back walls.
-                    If False, only alignment and centering are performed.
-        order (int): Interpolation order for the affine transformation:
-                    0: Nearest-neighbor (fastest, lowest quality)
-                    1: Linear interpolation
-                    3: Cubic interpolation (slower, higher quality)
-        cval (int): Fill value for regions outside the input volume after transformation.
-                    If set to -1 (default), the minimum value from the center slice is used.
-        
-    Returns:
-        numpy.ndarray: Processed volume (aligned, centered, and optionally cropped)
-    """
-    
-    # Determine appropriate fill value if not explicitly provided
-    if cval == -1:
-        # Use minimum value from central slice as background fill value
-        cval = volume[volume.shape[0] // 2, volume.shape[1] // 2].min()
-
-    # Generate binary mask identifying material voxels in the original volume
-    mask = onlypores.material_mask(volume)
-
-    # Align the volume so principal axes match coordinate axes (PCA-based alignment)
-    volume = align_volume_xyz(volume, mask, order, cval)
-
-    # Generate a new mask for the aligned volume (needed since volume geometry changed)
-    mask = onlypores.material_mask(volume)
-
-    # Center the volume by cropping to the bounding box of the material
-    volume, mask = centering(volume, mask)
-
-    # Return the centered volume if cropping is not requested
-    if not crop:
-        return volume
-    
-    # Crop the volume to remove non-material regions at front and back walls
-    volume, _, _ = crop_walls(volume, mask)
-    
-    return volume
-
 def rotate_volume_axis(volume, axis, angle, n_jobs=-1, cval=40, parallel=True):
     """
     Rotate a 3D volume around a specified axis using parallel or sequential processing.
@@ -440,3 +408,61 @@ def rotate_volume_axis(volume, axis, angle, n_jobs=-1, cval=40, parallel=True):
             rotated_volume[i,:,:] = rotated_slice
     
     return rotated_volume
+
+def main(volume, crop=False, cval=-1):
+    """
+    Main processing function that aligns a 3D volume to its principal axes and optionally crops it.
+    
+    This function performs the following operations in sequence:
+    1. Determines appropriate fill value (cval) for regions outside input volume if not provided
+    2. Generates a binary mask to identify material regions in the volume
+    3. Aligns the volume using PCA so principal axes of the object match coordinate axes
+    4. Regenerates the material mask for the aligned volume
+    5. Centers the volume by cropping to the bounding box of the material
+    6. Optionally crops the volume to remove non-material regions at front and back
+    
+    Args:
+        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z) to be processed.
+        crop (bool): If True, crop the volume to remove non-material regions at front/back walls.
+                    If False, only alignment and centering are performed.
+        order (int): Interpolation order for the affine transformation:
+                    0: Nearest-neighbor (fastest, lowest quality)
+                    1: Linear interpolation
+                    3: Cubic interpolation (slower, higher quality)
+        cval (int): Fill value for regions outside the input volume after transformation.
+                    If set to -1 (default), the minimum value from the center slice is used.
+        
+    Returns:
+        numpy.ndarray: Processed volume (aligned, centered, and optionally cropped) with axes (z,y,x).
+    """
+    
+    # Determine appropriate fill value if not explicitly provided
+    if cval == -1:
+        # Use minimum value from central slice as background fill value
+        cval = volume[volume.shape[0] // 2, volume.shape[1] // 2].min()
+
+    #reslice so the volume is in (z,y,x) format
+    volume = reslicer.rotate_90(volume, clockwise=True)
+    volume = reslicer.reslice(volume, 'Top')
+
+    # Align the volume so principal axes match coordinate axes (PCA-based alignment)
+    volume = align_volume_xy(volume, cval=cval)
+
+    #undo the reslicing so the volume is back in (x,y,z) format
+    volume = reslicer.reslice(volume, 'Bottom')
+    volume = reslicer.rotate_90(volume, clockwise=False)
+
+    # Generate a new mask for the aligned volume (needed since volume geometry changed)
+    mask = onlypores.material_mask(volume)
+
+    # Center the volume by cropping to the bounding box of the material
+    volume, mask = centering(volume, mask)
+
+    # Return the centered volume if cropping is not requested
+    if not crop:
+        return volume
+    
+    # Crop the volume to remove non-material regions at front and back walls
+    volume, _, _ = crop_walls(volume, mask)
+    
+    return volume
