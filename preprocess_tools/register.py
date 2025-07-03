@@ -1,8 +1,14 @@
 import numpy as np
 import cv2
-from scipy.ndimage import rotate
 from scipy.signal import find_peaks
 from tqdm import tqdm  # Progress bar for long operations
+from PIL import Image
+from skimage.filters import threshold_otsu
+from scipy.ndimage import label, binary_fill_holes
+from skimage.measure import regionprops
+import cv2
+import scipy.ndimage
+from joblib import Parallel, delayed
 
 def UT_surface_coordinates(volume_UT, signal_percentage=1.0):
     """
@@ -310,3 +316,904 @@ def YZ_XZ_inclination(volume, volumeType='XCT', signal_percentage=1.0):
     angle_xz = np.degrees(np.arctan(a))  # Tilt relative to XZ plane (around Y axis)
 
     return angle_yz, angle_xz
+
+
+#### MONOELEMENT VS XCT REGISTERING FUNCTIONS ####
+
+def calculate_new_dimensions(original_resolution, new_resolution, original_dimensions):
+    """
+    Calculate new image dimensions when changing resolution.
+    
+    This function computes the new pixel dimensions required when converting
+    an image from one resolution to another while maintaining the same
+    real-world size.
+    
+    Parameters
+    ----------
+    original_resolution : float
+        Original pixel size in real-world units (e.g., mm/pixel).
+    new_resolution : float
+        Target pixel size in real-world units (e.g., mm/pixel).
+    original_dimensions : tuple of int
+        Original image dimensions as (width, height) in pixels.
+    
+    Returns
+    -------
+    tuple of int
+        New dimensions as (new_width, new_height) in pixels.
+    
+    Examples
+    --------
+    >>> calculate_new_dimensions(0.1, 0.05, (100, 200))
+    (200, 400)
+    """
+    # Calculate the original dimensions in real-world units
+    original_width, original_height = original_dimensions
+    real_world_width = original_width * original_resolution
+    real_world_height = original_height * original_resolution
+
+    # Calculate the new dimensions in pixels
+    new_width = int(real_world_width / new_resolution)
+    new_height = int(real_world_height / new_resolution)
+
+    return new_width, new_height
+
+def resize_image(original_image, size, show=False):
+    """
+    Resize a PIL Image to the specified dimensions.
+    
+    This function resizes a PIL Image object to new dimensions and optionally
+    displays the original and new sizes. The resized image is returned as a
+    numpy array.
+    
+    Parameters
+    ----------
+    original_image : PIL.Image
+        The original PIL Image object to be resized.
+    size : tuple of int
+        Target dimensions as (width, height) in pixels.
+    show : bool, optional
+        If True, prints the original and resized image dimensions.
+        Default is False.
+    
+    Returns
+    -------
+    numpy.ndarray
+        The resized image as a numpy array.
+    
+    Examples
+    --------
+    >>> from PIL import Image
+    >>> img = Image.new('RGB', (100, 200))
+    >>> resized = resize_image(img, (50, 100), show=True)
+    The original image size is 100 wide x 200 tall
+    The resized image size is 50 wide x 100 tall
+    """
+    width, height = original_image.size
+    if show:
+        print(f"The original image size is {width} wide x {height} tall")
+
+    resized_image = original_image.resize(size)
+    width, height = resized_image.size
+    if show:
+        print(f"The resized image size is {width} wide x {height} tall")
+    return np.array(resized_image)
+
+def find_rectangle_centers(image):
+    """
+    Find the center coordinates of rectangular objects in a binary image.
+    
+    This function uses OpenCV's connected components analysis to identify
+    separate objects in a binary image and returns their centroid coordinates.
+    The background (first component) is ignored.
+    
+    Parameters
+    ----------
+    image : numpy.ndarray
+        Binary image where objects are represented by True/1 values and
+        background by False/0 values.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Array of centroid coordinates with shape (N, 2), where N is the
+        number of detected objects. Each row contains (x, y) coordinates.
+    
+    Raises
+    ------
+    AssertionError
+        If the input image is not binary (contains values other than 0 and 1).
+    
+    Notes
+    -----
+    This function expects a strictly binary image and will raise an assertion
+    error if non-binary values are detected.
+    """
+    # Ensure the image is binary
+    assert np.array_equal(image, image.astype(bool)), "Image must be binary"
+
+    # Find connected components in the image
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(image.astype('uint8'))
+
+    # The first component is the background, so ignore it
+    return centroids[1:]
+
+def paint_binary_points(shape, points):
+    """
+    Create a binary image with points marked at specified coordinates.
+    
+    This function creates a binary image of the specified shape and marks
+    points at the given coordinates with white pixels (value 255).
+    
+    Parameters
+    ----------
+    shape : tuple of int
+        Desired image shape as (height, width).
+    points : array-like
+        Array of point coordinates with shape (N, 2), where each row
+        contains (y, x) coordinates of a point to mark.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Binary image of type uint8 with points marked as white pixels (255)
+        and background as black pixels (0).
+    
+    Notes
+    -----
+    Point coordinates are rounded to the nearest integer before painting.
+    The function expects coordinates in (y, x) format but internally
+    swaps them for proper indexing.
+    """
+    # Create an empty image of the specified shape
+    image = np.zeros(shape, dtype=np.uint8)
+
+    # Iterate over the points
+    for point in points:
+        # Round the coordinates to the nearest integer
+        y, x = tuple(int(round(coord)) for coord in point)
+        # Draw the point on the image
+        image[x, y] = 255
+
+    return image.astype(np.uint8)
+
+def label_objects(image):
+    """
+    Label detected objects in a binary image with different intensity values.
+    
+    This function assigns different grayscale values to connected objects
+    in a binary image based on their position. The topmost object gets
+    value 100, the leftmost remaining object gets value 175, and all
+    other objects get value 255.
+    
+    Parameters
+    ----------
+    image : numpy.ndarray
+        Binary image containing connected objects to be labeled.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Labeled image where:
+        - Background pixels remain 0
+        - Topmost object pixels have value 100
+        - Leftmost remaining object pixels have value 175
+        - All other object pixels have value 255
+    
+    Notes
+    -----
+    This function is specifically designed for scenarios where you need
+    to distinguish between a limited number of objects based on their
+    spatial arrangement (top, left, others).
+    """
+    labeled_image, num_features = label(image)
+    output_image = np.zeros_like(image)
+    
+    # Get all non-zero pixel coordinates
+    indices = np.where(labeled_image > 0)
+    indices = list(zip(indices[0], indices[1]))
+    
+    # Label the object nearest to the top edge (smallest row index)
+    top_object = min(indices, key=lambda x: x[0])
+    output_image[top_object] = 100
+    indices.remove(top_object)
+    
+    if indices:
+        # Label the object nearest to the left edge (smallest column index)
+        left_object = min(indices, key=lambda x: x[1])
+        output_image[left_object] = 175
+        indices.remove(left_object)
+    
+    # Label the remaining objects with maximum intensity
+    for idx in indices:
+        output_image[idx] = 255
+    
+    return output_image.astype(np.uint8)
+
+def find_holes_minimums(image, labeled_image):
+    """
+    Find the center coordinates of minimum intensity values in labeled regions.
+    
+    This function identifies the center of the minimum intensity value within
+    each labeled region of an image. When multiple pixels share the minimum
+    value, it selects the one closest to the geometric center of those pixels.
+    
+    Parameters
+    ----------
+    image : numpy.ndarray
+        8-bit grayscale input image containing intensity values.
+    labeled_image : numpy.ndarray
+        Labeled image with distinct integer values for each region.
+        Background should be 0, and each object should have a unique
+        positive integer label.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Array of centroid coordinates with shape (N, 2), where N is the
+        number of labeled regions. Each row contains (x, y) coordinates
+        of the center of minimum intensity for each region.
+    
+    Notes
+    -----
+    The function uses skimage.measure.regionprops to analyze each labeled
+    region and find the coordinates with minimum intensity values. If
+    multiple pixels have the same minimum value, the algorithm selects
+    the one closest to the mean position of all minimum pixels.
+    """
+    regions = regionprops(labeled_image, intensity_image=image)
+    centers = []
+
+    for region in regions:
+        # Get the coordinates of the region
+        coords = region.coords
+        # Get the intensity values of the region
+        intensities = image[coords[:, 0], coords[:, 1]]
+        # Find the minimum intensity value
+        min_value = np.min(intensities)
+        # Get the coordinates of the minimum intensity value
+        min_coords = coords[intensities == min_value]
+        
+        if len(min_coords) > 1:
+            # If there are multiple minimums, find the most centered one
+            center = np.mean(min_coords, axis=0)
+            distances = np.linalg.norm(min_coords - center, axis=1)
+            min_coords = min_coords[np.argmin(distances)]
+        else:
+            min_coords = min_coords[0]
+        
+        # Return coordinates in (x, y) format by reversing the order
+        centers.append(min_coords[::-1])
+    
+    return np.array(centers)
+
+def ut_preprocessing(ut):
+    """
+    Preprocess ultrasound volume to extract and locate pore centers.
+    
+    This function processes a 3D ultrasound volume to identify and locate
+    the centers of the three largest pores or holes in the sample. The
+    process involves maximum projection, Otsu thresholding, hole filling,
+    and region analysis to find pore locations.
+    
+    Parameters
+    ----------
+    ut : numpy.ndarray
+        3D ultrasound volume with shape (Z, Y, X) where Z is the depth
+        axis and Y, X are the spatial dimensions.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Binary image with the same spatial dimensions as the input's Y-X
+        plane, where pore centers are marked as white pixels (255) and
+        background is black (0).
+    
+    Notes
+    -----
+    The algorithm follows these steps:
+    1. Create maximum intensity projection along the Z-axis
+    2. Apply Otsu thresholding for segmentation
+    3. Fill holes in the binary mask
+    4. Extract pores as holes within the filled regions
+    5. Label connected components and select the 3 largest regions
+    6. Find the minimum intensity centers within each region
+    7. Paint the centers on a binary image
+    """
+    # Get the frontwall slice through maximum projection
+    ut_max_proj = np.max(ut, axis=2)
+
+    # Apply Otsu thresholding for automatic segmentation
+    thresh = threshold_otsu(ut_max_proj)
+    binary = ut_max_proj > thresh
+
+    # Fill holes in the binary mask to create solid regions
+    mask = binary_fill_holes(binary)
+
+    # Invert the binary image to highlight dark regions
+    inverted = np.invert(binary)
+
+    # Extract pores as the intersection of filled regions and dark areas
+    circles = np.logical_and(mask, inverted)
+
+    # Label connected components to identify individual holes
+    labeled, _ = label(circles)
+
+    # Analyze region properties to find the largest pores
+    props = regionprops(labeled)
+
+    # Sort regions by area in descending order and get the 3 largest
+    sorted_regions = sorted(props, key=lambda x: x.area, reverse=True)
+    largest_regions_labels = [region.label for region in sorted_regions[:3]]
+
+    # Create images to hold the results
+    largest_regions_image = np.zeros_like(labeled)
+    labeled_image = np.zeros_like(labeled)
+
+    # Extract the three largest regions with their original intensities
+    for lbl in largest_regions_labels:
+        largest_regions_image[labeled == lbl] = ut_max_proj[labeled == lbl]
+        labeled_image[labeled == lbl] = lbl
+
+    # Find the centers of minimum intensity within each region
+    ut_centers = find_holes_minimums(largest_regions_image, labeled_image)
+
+    # Create a binary image marking the pore centers
+    centers_painted_ut = paint_binary_points(largest_regions_image.shape, ut_centers)
+
+    return centers_painted_ut.astype(ut.dtype)
+
+def xct_preprocessing(xct, original_resolution=0.025, new_resolution=1.0):
+    """
+    Preprocess X-ray CT volume to extract and locate pore centers.
+    
+    This function processes a 3D X-ray CT volume to identify pores and
+    resize the result to match ultrasound resolution for registration
+    purposes. It performs segmentation, hole detection, and resizing.
+    
+    Parameters
+    ----------
+    xct : numpy.ndarray
+        3D X-ray CT volume with shape (Z, Y, X) where Z is the depth
+        axis and Y, X are the spatial dimensions.
+    original_resolution : float, optional
+        Original pixel size of the XCT data in real-world units
+        (e.g., mm/pixel). Default is 0.025.
+    new_resolution : float, optional
+        Target pixel size for resizing in real-world units
+        (e.g., mm/pixel). Default is 1.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Binary image with pore centers marked as white pixels (255)
+        at the target resolution, ready for registration with UT data.
+    
+    Notes
+    -----
+    The algorithm follows these steps:
+    1. Create maximum intensity projection along the Z-axis
+    2. Calculate new dimensions based on resolution change
+    3. Apply Otsu thresholding for segmentation
+    4. Fill holes and extract pores as dark regions within solid areas
+    5. Resize the binary pore image to target resolution
+    6. Find pore centers using connected component analysis
+    7. Paint centers on a binary image
+    """
+    # Get the maximum projection of the XCT so the holes are visible
+    max_proj = np.max(xct, axis=2)
+
+    # Calculate target dimensions for resolution conversion
+    original_dimensions = (xct.shape[0], xct.shape[1])
+    new_dimensions = calculate_new_dimensions(original_resolution, new_resolution, original_dimensions)
+
+    # Segment and extract pores using Otsu thresholding
+    thresh = threshold_otsu(max_proj)
+    binary = max_proj > thresh
+
+    # Fill holes in the binary mask
+    mask = binary_fill_holes(binary)
+
+    # Invert to highlight dark regions (pores)
+    inverted = np.invert(binary)
+
+    # Extract pores as intersection of filled regions and dark areas
+    circles = np.logical_and(mask, inverted)
+
+    # Resize the pore image to target resolution
+    circles = resize_image(Image.fromarray(circles), new_dimensions[::-1])
+
+    # Find pore centers using connected component analysis
+    xct_centers = find_rectangle_centers(circles)
+
+    # Create binary image marking the pore centers
+    centers_painted_xct = paint_binary_points(circles.shape, xct_centers)
+
+    return centers_painted_xct.astype(xct.dtype)
+
+def extract_points(image):
+    """
+    Extract coordinates and intensity values of non-zero pixels from an image.
+    
+    This function scans through all pixels in an image and returns the
+    coordinates and intensity values of pixels that have non-zero values.
+    This is typically used to extract point locations from labeled or
+    binary images.
+    
+    Parameters
+    ----------
+    image : numpy.ndarray
+        2D image array where non-zero pixels represent points of interest.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Array with shape (N, 3) where N is the number of non-zero pixels.
+        Each row contains [row, column, intensity_value] for each point.
+    
+    Notes
+    -----
+    The function returns coordinates in (row, column) format, which
+    corresponds to (y, x) in image coordinate systems. The third column
+    contains the pixel intensity value at that location.
+    """
+    points = []
+    # Scan through all pixels in the image
+    for i in range(image.shape[0]):
+        for j in range(image.shape[1]):
+            if image[i, j] > 0:
+                # Store [row, column, intensity] for each non-zero pixel
+                points.append([i, j, image[i, j]])
+    return np.array(points)
+
+def rigid_body_transformation_matrix(points_A, points_B):
+    """
+    Calculate the rigid body transformation matrix to align points_B to points_A.
+    
+    This function computes the optimal rigid body transformation (rotation and
+    translation) that aligns a set of 2D points (points_B) to another set of
+    2D points (points_A) using the Procrustes analysis algorithm with SVD.
+    
+    Parameters
+    ----------
+    points_A : numpy.ndarray
+        Target point set with shape (N, 2), where N is the number of points
+        and each row contains (x, y) coordinates.
+    points_B : numpy.ndarray
+        Source point set with shape (N, 2) that will be transformed to
+        align with points_A.
+    
+    Returns
+    -------
+    numpy.ndarray
+        3x3 homogeneous transformation matrix that can be used to transform
+        points_B to align with points_A. The matrix includes rotation and
+        translation components.
+    
+    Notes
+    -----
+    The algorithm uses the following steps:
+    1. Compute centroids of both point sets
+    2. Center the points by subtracting their centroids
+    3. Compute the cross-covariance matrix
+    4. Use SVD to find the optimal rotation matrix
+    5. Ensure proper orientation (right-handed coordinate system)
+    6. Calculate the translation vector
+    7. Construct the homogeneous transformation matrix
+    
+    The transformation matrix can be applied to homogeneous coordinates
+    or used with affine transformation functions.
+    """
+    # Compute the centroids of both sets of points
+
+    centroid_A = np.mean(points_A, axis=0)
+    centroid_B = np.mean(points_B, axis=0)
+
+    # Center the points by subtracting the centroids
+    centered_A = points_A - centroid_A
+    centered_B = points_B - centroid_B
+    
+    # Compute the cross-covariance matrix
+    H = np.dot(centered_B.T, centered_A)
+    
+    # Perform Singular Value Decomposition (SVD)
+    U, S, Vt = np.linalg.svd(H)
+    
+    # Compute the rotation matrix
+    R = np.dot(Vt.T, U.T)
+    
+    # Ensure a right-handed coordinate system
+    if np.linalg.det(R) < 0:
+        Vt[-1, :] *= -1
+        R = np.dot(Vt.T, U.T)
+    
+    # Compute the translation vector
+    t = centroid_A - np.dot(R, centroid_B)
+    
+    # Construct the homogeneous transformation matrix
+    transformation_matrix = np.eye(3)
+    transformation_matrix[:2, :2] = R
+    transformation_matrix[:2, 2] = t
+    
+    return transformation_matrix
+
+def scale_transformation_matrix(transformation_matrix, scale_factor):
+    """
+    Scale the translation components of a 2D rigid body transformation matrix.
+    
+    This function applies a scaling factor to the translation components
+    of a transformation matrix while preserving the rotation components.
+    This is useful when working with different coordinate systems or
+    pixel resolutions.
+    
+    Parameters
+    ----------
+    transformation_matrix : numpy.ndarray
+        3x3 homogeneous transformation matrix containing rotation
+        and translation components.
+    scale_factor : float
+        Scaling factor to apply to the translation components.
+        Values > 1 increase translation distances, values < 1 decrease them.
+    
+    Returns
+    -------
+    numpy.ndarray
+        3x3 scaled transformation matrix where only the translation
+        components (last column, first two rows) have been scaled.
+    
+    Notes
+    -----
+    This function only scales the translation vector while keeping the
+    rotation matrix unchanged. This is typically used when converting
+    transformations between different pixel resolutions or coordinate
+    systems where the spatial relationship needs to be preserved but
+    the units need to be adjusted.
+    """
+    # Create a copy to avoid modifying the original matrix
+    scaled_transformation_matrix = transformation_matrix.copy()
+
+    # Scale only the translation components (first two elements of last column)
+    scaled_transformation_matrix[:2, 2] *= scale_factor
+
+    return scaled_transformation_matrix
+
+def apply_transform_parameters_sequential(matrix, ut, xct, original_resolution=0.025):
+    """
+    Apply transformation matrix to XCT volume sequentially slice by slice.
+    
+    This function applies a 2D affine transformation to each slice of a 3D
+    XCT volume sequentially. The output is resized to match the resolution
+    and dimensions needed for registration with the UT volume.
+    
+    Parameters
+    ----------
+    matrix : numpy.ndarray
+        3x3 or 2x3 transformation matrix defining the affine transformation
+        to apply to each XY slice of the volume.
+    ut : numpy.ndarray
+        UT volume used as reference for output dimensions, with shape (Z, Y, X).
+    xct : numpy.ndarray
+        XCT volume to be transformed, with shape (Z, Y, X) for 3D volumes
+        or (Y, X) for 2D images.
+    original_resolution : float, optional
+        Original pixel resolution of the XCT data in real-world units.
+        Default is 0.025.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Transformed volume with shape matching the target resolution.
+        For 3D input, returns 3D output. For 2D input, returns 2D output.
+    
+    Notes
+    -----
+    This function processes slices sequentially, which may be slower than
+    parallel processing but uses less memory. The transformation is applied
+    to XY planes while preserving the Z dimension structure.
+    
+    The output shape is calculated to match the target resolution while
+    maintaining the same real-world dimensions as the UT reference volume.
+    """
+    # Calculate output dimensions based on resolution scaling
+    big_shape = calculate_new_dimensions(1, original_resolution, ut.shape[:2])
+
+    transformed_volume = []
+
+    if len(xct.shape) == 3:
+        # Process 3D volume slice by slice
+        for i in range(xct.shape[2]):
+            # Apply transformation to each XY slice
+            transformed_slice = scipy.ndimage.affine_transform(
+                xct[:, :, i], matrix[:2, :], output_shape=big_shape
+            )
+            transformed_volume.append(transformed_slice)
+        
+        # Convert list to numpy array and rearrange axes
+        transformed_volume = np.array(transformed_volume)
+        transformed_volume = np.swapaxes(transformed_volume, 0, 1)
+        transformed_volume = np.swapaxes(transformed_volume, 1, 2)
+
+        return transformed_volume
+    else:
+        # Process 2D image
+        # Apply transformation to the 2D image
+        transformed_slice = scipy.ndimage.affine_transform(
+            xct, matrix[:2, :], output_shape=big_shape
+        )
+        transformed_volume.append(transformed_slice)
+
+        # Convert and rearrange axes
+        transformed_volume = np.array(transformed_volume)
+        transformed_volume = np.swapaxes(transformed_volume, 0, 1)
+        transformed_volume = np.swapaxes(transformed_volume, 1, 2)
+
+        return transformed_volume[:, :, 0]
+
+def apply_transform_parameters_paralel(matrix, ut, xct, original_resolution=0.025):
+    """
+    Apply transformation matrix to XCT volume using parallel processing.
+    
+    This function applies a 2D affine transformation to each slice of a 3D
+    XCT volume using parallel processing with joblib. This approach is
+    faster than sequential processing for large volumes but uses more memory.
+    
+    Parameters
+    ----------
+    matrix : numpy.ndarray
+        3x3 or 2x3 transformation matrix defining the affine transformation
+        to apply to each XY slice of the volume.
+    ut : numpy.ndarray
+        UT volume used as reference for output dimensions, with shape (Z, Y, X).
+    xct : numpy.ndarray
+        XCT volume to be transformed, with shape (Z, Y, X).
+    original_resolution : float, optional
+        Original pixel resolution of the XCT data in real-world units.
+        Default is 0.025.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Transformed 3D volume with shape matching the target resolution.
+    
+    Notes
+    -----
+    This function uses joblib.Parallel to process multiple slices
+    simultaneously across available CPU cores. The number of cores
+    used is determined by n_jobs=-1 (all available cores).
+    
+    A progress bar using tqdm would be shown during processing to
+    track the transformation progress across all slices.
+    """
+    # Calculate output dimensions based on resolution scaling
+    big_shape = calculate_new_dimensions(1, original_resolution, ut.shape[:2])
+
+    def func(slice, matrix, shape):
+        """Apply affine transform to a single slice."""
+        return scipy.ndimage.affine_transform(slice, matrix, output_shape=shape)
+
+    def process_slice(z, volume, matrix, shape):
+        """Extract and process a single Z-slice from the volume."""
+        current_slice = volume[:, :, z]  # Extract the (X, Y) slice
+        return func(current_slice, matrix, shape)  # Apply the transformation
+
+    # Use all available CPU cores for parallel processing
+    n_jobs = -1
+    n_slices = xct.shape[2]  # Number of slices in the Z dimension
+
+    # Apply transformation to all slices in parallel
+    transformed_slices = Parallel(n_jobs=n_jobs)(
+        delayed(process_slice)(z, xct, matrix[:2, :], big_shape) for z in range(n_slices)
+    )
+
+    # Reassemble the transformed slices into the final 3D array
+    transformed_volume = np.stack(transformed_slices, axis=2)
+
+    return transformed_volume
+
+def apply_transform_parameters(matrix, ut, xct, original_resolution=0.025, parallel=False):
+    """
+    Apply transformation matrix to XCT volume with choice of processing method.
+    
+    This is a wrapper function that allows choosing between sequential and
+    parallel processing for applying a transformation matrix to an XCT volume.
+    The choice depends on memory constraints and performance requirements.
+    
+    Parameters
+    ----------
+    matrix : numpy.ndarray
+        3x3 or 2x3 transformation matrix defining the affine transformation
+        to apply to each XY slice of the volume.
+    ut : numpy.ndarray
+        UT volume used as reference for output dimensions, with shape (Z, Y, X).
+    xct : numpy.ndarray
+        XCT volume to be transformed, with shape (Z, Y, X) for 3D volumes
+        or (Y, X) for 2D images.
+    original_resolution : float, optional
+        Original pixel resolution of the XCT data in real-world units.
+        Default is 0.025.
+    parallel : bool, optional
+        If True, uses parallel processing (faster but more memory intensive).
+        If False, uses sequential processing (slower but memory efficient).
+        Default is False.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Transformed volume with shape matching the target resolution.
+    
+    Notes
+    -----
+    Choose parallel=True for faster processing when:
+    - Working with large volumes
+    - Multiple CPU cores are available
+    - Memory usage is not a constraint
+    
+    Choose parallel=False for memory efficiency when:
+    - Working with limited memory
+    - Single-core processing is preferred
+    - Memory usage needs to be minimized
+    """
+    if parallel:
+        return apply_transform_parameters_paralel(matrix, ut, xct, original_resolution)
+    else:
+        return apply_transform_parameters_sequential(matrix, ut, xct, original_resolution)
+
+def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_resolution = 0.025):
+    """
+    Register ultrasound and X-ray CT volumes using pore-based alignment.
+    
+    This function performs automatic registration between UT and XCT volumes
+    by detecting pores in both modalities and computing the rigid body
+    transformation needed to align them. The registration is based on
+    matching the three largest pores found in both volumes.
+    
+    Parameters
+    ----------
+    ut : numpy.ndarray
+        3D ultrasound volume with shape (Z, Y, X) where Z is the depth
+        axis and Y, X are the spatial dimensions.
+    xct : numpy.ndarray
+        3D X-ray CT volume with shape (Z, Y, X) where Z is the depth
+        axis and Y, X are the spatial dimensions.
+    
+    Returns
+    -------
+    tuple
+        A tuple containing:
+        - parameters (numpy.ndarray): 3x3 transformation matrix scaled for
+          application to full-resolution XCT data
+        - ut_centers (numpy.ndarray): Labeled UT pore centers image
+        - xct_centers (numpy.ndarray): Labeled XCT pore centers image
+        - transformed_xct_centers (numpy.ndarray): XCT centers transformed
+          to UT coordinate system for verification
+    
+    Raises
+    ------
+    ValueError
+        If fewer than 3 pores are detected in either volume, or if the
+        number of detected pores differs between UT and XCT volumes.
+    
+    Notes
+    -----
+    The registration process follows these steps:
+    1. Preprocess both volumes to extract pore locations
+    2. Label pores based on spatial arrangement (top, left, others)
+    3. Extract point coordinates from labeled images
+    4. Sort points by their labels to ensure correspondence
+    5. Compute rigid body transformation between point sets
+    6. Scale transformation for application to full-resolution data
+    7. Apply transformation to XCT centers for verification
+    
+    The function requires at least 3 corresponding pores in both volumes
+    for robust registration. The pores are matched based on their spatial
+    arrangement rather than geometric proximity.
+    """
+    print('Preprocessing')
+
+    
+    ut = np.swapaxes(ut, 0, 1)
+    ut = np.swapaxes(ut, 1, 2)
+
+    xct = np.swapaxes(xct, 0, 1)
+    xct = np.swapaxes(xct, 1, 2)
+
+    # Extract and label pore centers from both volumes
+    ut_centers = label_objects(ut_preprocessing(ut))
+    xct_centers = label_objects(xct_preprocessing(xct,original_resolution = registered_resolution, new_resolution = reference_resolution))
+
+    # Extract point coordinates and intensity values from labeled images
+    ut_points = extract_points(ut_centers)
+    xct_points = extract_points(xct_centers)
+
+    # Sort points by their intensity labels to ensure correspondence
+    sorted_indices_ut = np.argsort(ut_points[:, -1])
+    sorted_indices_xct = np.argsort(xct_points[:, -1])
+
+    # Apply sorting to get corresponding point sets
+    sorted_ut_points = ut_points[sorted_indices_ut]
+    sorted_xct_points = xct_points[sorted_indices_xct]
+
+    # Validate that we have sufficient points for registration
+    if len(sorted_ut_points) < 3:
+        print('Not enough UT points')
+        raise ValueError('Not enough UT points')
+
+    if len(sorted_xct_points) < 3:
+        print('Not enough XCT points')
+        raise ValueError('Not enough XCT points')
+
+    # Ensure we have the same number of corresponding points
+    if len(sorted_ut_points) != len(sorted_xct_points):
+        print('Different number of points')
+        raise ValueError('Different number of points')
+    
+    print('Preprocessed')
+
+    print('Registering')
+
+    # Compute transformation from XCT to UT coordinate system
+    transformation_matrix = rigid_body_transformation_matrix(
+        sorted_xct_points[:, :2], sorted_ut_points[:, :2]
+    )
+    
+    # Scale transformation for application to full-resolution XCT data
+    scaled_transformation_matrix = scale_transformation_matrix(transformation_matrix, reference_resolution/registered_resolution)
+
+    print('Registered')
+
+    # Store the scaled transformation as the final parameters
+    parameters = scaled_transformation_matrix
+
+    # Apply transformation to XCT centers for verification
+    transformed_xct_centers = apply_transform_parameters(
+        transformation_matrix, ut, ((xct_centers > 0) * 255).astype(xct.dtype), original_resolution=reference_resolution
+    )
+
+    return parameters, ut_centers, xct_centers, transformed_xct_centers
+
+def apply_registration(ut, xct, parameters):
+    """
+    Apply pre-computed registration parameters to align XCT volume with UT volume.
+    
+    This function applies a previously computed transformation matrix to
+    register an XCT volume with a UT volume. It is typically used after
+    registration parameters have been computed using register_ut_xct_monoelement().
+    
+    Parameters
+    ----------
+    ut : numpy.ndarray
+        Reference UT volume with shape (Z, Y, X) used to determine output
+        dimensions and coordinate system.
+    xct : numpy.ndarray
+        XCT volume to be transformed and registered, with shape (Z, Y, X).
+    parameters : numpy.ndarray
+        3x3 transformation matrix obtained from the registration process,
+        containing rotation, translation, and scaling components.
+    
+    Returns
+    -------
+    numpy.ndarray
+        Transformed XCT volume aligned with the UT coordinate system.
+        The output has the same dimensions and coordinate system as the
+        reference UT volume.
+    
+    Notes
+    -----
+    This function is designed to be used as the second step in a two-stage
+    registration process:
+    1. First, use register_ut_xct_monoelement() to compute registration parameters
+    2. Then, use this function to apply those parameters to the full XCT volume
+    
+    The transformation preserves the spatial relationships while aligning
+    the XCT data to match the UT coordinate system and resolution.
+    """
+    transformation_matrix = parameters
+
+    print('Applying transformation')
+
+    # Apply the transformation matrix to the entire XCT volume
+    transformed_volume = apply_transform_parameters(transformation_matrix, ut, xct)
+
+    print('Transformation applied')
+
+    return transformed_volume
