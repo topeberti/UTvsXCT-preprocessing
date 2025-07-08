@@ -1,9 +1,25 @@
+"""
+Dataset Maker for UT vs XCT Preprocessing
+
+This module provides tools for creating datasets from ultrasonic testing (UT) and 
+X-ray computed tomography (XCT) data. It handles preprocessing, patching, and dataset 
+generation for machine learning applications in non-destructive testing.
+
+The main workflow includes:
+1. Preprocessing images to align UT and XCT data
+2. Dividing images into patches for analysis
+3. Computing volumetric and area fractions of pores
+4. Creating datasets for machine learning models
+
+Author: Alberto Vicente
+Date: 2025
+"""
+
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from skimage import measure
 from skimage.measure import regionprops
-import pandas as pd
 from skimage.util import view_as_windows
 from skimage.measure import label, regionprops
 import scipy.ndimage
@@ -11,17 +27,46 @@ from joblib import Parallel, delayed
 
 
 def divide_into_patches(image, patch_size, step_size):
-    patches = view_as_windows(image, (image.shape[0], patch_size, patch_size), step=(image.shape[0], step_size, step_size))
+    """
+    Divide a 3D image into overlapping patches.
+    
+    This function takes a 3D image and divides it into smaller patches along the 
+    spatial dimensions (keeping the z-dimension intact). The patches can overlap 
+    based on the step size.
+    
+    Args:
+        image (np.ndarray): 3D input image with shape (z, x, y)
+        patch_size (int): Size of the square patches in the x-y plane
+        step_size (int): Step size between patches (determines overlap)
+        
+    Returns:
+        np.ndarray: Array of patches with shape (n_patches, z, patch_size, patch_size)
+        
+    Example:
+        >>> patches = divide_into_patches(image, patch_size=64, step_size=32)
+    """
+    patches = view_as_windows(image, (image.shape[0], patch_size, patch_size), 
+                             step=(image.shape[0], step_size, step_size))
     return patches.reshape(-1, image.shape[0], patch_size, patch_size)
 
-def generate_patches(image, patch_size, step_size):
-    _, height, width = image.shape
-    for i in range(0, height - patch_size + 1, step_size):
-        for j in range(0, width - patch_size + 1, step_size):
-            patch = image[:, i:i + patch_size, j:j + patch_size]
-            yield patch
-
 def calculate_patch_shape(image_shape, patch_size, step_size):
+    """
+    Calculate the expected shape of patches array without actually creating patches.
+    
+    This function calculates how many patches will be generated and their dimensions
+    when dividing an image into patches.
+    
+    Args:
+        image_shape (tuple): Shape of the input image (z, x, y)
+        patch_size (int): Size of square patches in x-y plane
+        step_size (int): Step size between patches
+        
+    Returns:
+        tuple: Expected shape (n_patches, z, patch_size, patch_size)
+        
+    Example:
+        >>> shape = calculate_patch_shape((100, 512, 512), 64, 32)
+    """
     # Calculate the number of patches along each dimension
     num_patches_h = ((image_shape[1] - patch_size) // step_size) + 1
     num_patches_w = ((image_shape[2] - patch_size) // step_size) + 1
@@ -31,8 +76,27 @@ def calculate_patch_shape(image_shape, patch_size, step_size):
 
 
 def calculate_pixels(ut_resolution, xct_resolution, ut_pixels):
+    """
+    Convert pixel dimensions from UT resolution to XCT resolution.
+    
+    This function converts the number of pixels in UT coordinate system to the 
+    equivalent number of pixels in XCT coordinate system based on their respective
+    resolutions.
+    
+    Args:
+        ut_resolution (float): UT resolution in mm/pixel
+        xct_resolution (float): XCT resolution in mm/pixel  
+        ut_pixels (int): Number of pixels in UT coordinate system
+        
+    Returns:
+        float: Equivalent number of pixels in XCT coordinate system
+        
+    Example:
+        >>> xct_pixels = calculate_pixels(ut_resolution=1.0, xct_resolution=0.025, ut_pixels=3)
+        >>> # Returns 120.0 (3 * 1.0 / 0.025)
+    """
     # Calculate the ratio of the resolutions
-    resolution_ratio = ut_resolution /xct_resolution 
+    resolution_ratio = ut_resolution / xct_resolution 
     
     # Calculate the equivalent number of pixels in the xct resolution
     xct_pixels = ut_pixels * resolution_ratio
@@ -40,29 +104,75 @@ def calculate_pixels(ut_resolution, xct_resolution, ut_pixels):
     return xct_pixels
 
 def crop_image_to_patch_size(image, patch_size):
+    """
+    Crop a 3D image to make its spatial dimensions divisible by patch_size.
+    
+    This function removes pixels from the edges of the image to ensure that
+    the x and y dimensions are evenly divisible by the patch size. The cropping
+    is done symmetrically from both sides when possible.
+    
+    Args:
+        image (np.ndarray): 3D input image with shape (z, x, y)
+        patch_size (int): Target patch size for divisibility
+        
+    Returns:
+        np.ndarray: Cropped image with spatial dimensions divisible by patch_size
+        
+    Example:
+        >>> cropped = crop_image_to_patch_size(image, patch_size=64)
+    """
     z, x, y = image.shape
 
+    # Calculate how many pixels to remove from each dimension
     crop_x = x % patch_size
     crop_y = y % patch_size
 
+    # Distribute cropping symmetrically
     crop_x_before = crop_x // 2
     crop_x_after = crop_x - crop_x_before
 
     crop_y_before = crop_y // 2
     crop_y_after = crop_y - crop_y_before
 
+    # Apply cropping (handle edge case where crop_after is 0)
     cropped_image = image[:, crop_x_before:-crop_x_after or None, crop_y_before:-crop_y_after or None]
 
     return cropped_image
 
 def nearest_lower_divisible(num, divisor):
-	if num % divisor == 0:
-		return num
-	else:
-		remainder = num % divisor
-		return int(num - remainder)
+    """
+    Find the nearest lower number that is divisible by the divisor.
+    
+    Args:
+        num (int/float): Input number
+        divisor (int/float): Divisor value
+        
+    Returns:
+        int: Nearest lower number divisible by divisor
+        
+    Example:
+        >>> nearest_lower_divisible(127, 10)  # Returns 120
+    """
+    if num % divisor == 0:
+        return num
+    else:
+        remainder = num % divisor
+        return int(num - remainder)
 
 def nearest_higher_divisible(num, divisor):
+    """
+    Find the nearest higher number that is divisible by the divisor.
+    
+    Args:
+        num (int/float): Input number
+        divisor (int/float): Divisor value
+        
+    Returns:
+        int: Nearest higher number divisible by divisor
+        
+    Example:
+        >>> nearest_higher_divisible(123, 10)  # Returns 130
+    """
     if num % divisor == 0:
         return num
     else:
@@ -70,6 +180,27 @@ def nearest_higher_divisible(num, divisor):
         return int(num + divisor - remainder)
     
 def nearest_bounding_box(minr, minc, maxr, maxc, divisor):
+    """
+    Adjust bounding box coordinates to be divisible by a given divisor.
+    
+    This function adjusts the bounding box coordinates so that the resulting
+    dimensions are divisible by the specified divisor. Min coordinates are
+    rounded up, max coordinates are rounded down.
+    
+    Args:
+        minr (int): Minimum row coordinate
+        minc (int): Minimum column coordinate  
+        maxr (int): Maximum row coordinate
+        maxc (int): Maximum column coordinate
+        divisor (int/float): Divisor for coordinate adjustment
+        
+    Returns:
+        tuple: Adjusted (minr, minc, maxr, maxc) coordinates
+        
+    Example:
+        >>> bbox = nearest_bounding_box(15, 23, 127, 189, 10)
+        >>> # Returns (20, 30, 120, 180)
+    """
     minr = nearest_higher_divisible(minr, divisor)
     minc = nearest_higher_divisible(minc, divisor)
     maxr = nearest_lower_divisible(maxr, divisor)
@@ -77,328 +208,312 @@ def nearest_bounding_box(minr, minc, maxr, maxc, divisor):
 
     return minr, minc, maxr, maxc
 
-def preprocess(onlypores,mask,ut_rf, xct_resolution = 0.025, ut_resolution = 1):
-
-    #Cropeamos onlypores y la mascara para quitarnos el fondo y le aplicamos la misma bounding box a los datos de UT
-
-    # Calculate scaling factor
+def preprocess(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1):
+    """
+    Preprocess XCT and UT images by cropping to remove background and align coordinate systems.
+    
+    This function:
+    1. Finds the bounding box of the sample in XCT data using the mask
+    2. Crops XCT images (onlypores and mask) to this bounding box
+    3. Converts the bounding box to UT coordinate system and crops UT data accordingly
+    
+    Args:
+        onlypores (np.ndarray): 3D XCT image showing only pores (z, x, y)
+        mask (np.ndarray): 3D XCT mask defining the sample region (z, x, y)
+        ut_rf (np.ndarray): 3D UT radiofrequency data (z, x, y)
+        xct_resolution (float, optional): XCT pixel resolution in mm. Defaults to 0.025.
+        ut_resolution (float, optional): UT pixel resolution in mm. Defaults to 1.
+        
+    Returns:
+        tuple: (onlypores_cropped, mask_cropped, ut_rf_cropped) - cropped versions of inputs
+        
+    Example:
+        >>> onlypores_crop, mask_crop, ut_crop = preprocess(onlypores, mask, ut_rf)
+    """
+    # Calculate scaling factor between XCT and UT coordinate systems
     scaling_factor = xct_resolution / ut_resolution
 
-    #XCT 
-
+    # XCT processing: find sample bounding box using maximum projection of mask 
     max_proj = np.max(mask, axis=0)
 
+    # Label connected components and get region properties
     labels = measure.label(max_proj)
-
     props = regionprops(labels)
 
+    # Get bounding box of the first (and typically only) labeled region
     minr_xct, minc_xct, maxr_xct, maxc_xct = props[0].bbox
 
-    minr_xct, minc_xct, maxr_xct, maxc_xct = nearest_bounding_box(minr_xct, minc_xct, maxr_xct, maxc_xct, 1/scaling_factor)
+    # Adjust bounding box to ensure proper scaling alignment
+    minr_xct, minc_xct, maxr_xct, maxc_xct = nearest_bounding_box(
+        minr_xct, minc_xct, maxr_xct, maxc_xct, 1/scaling_factor)
 
-    #crop the volume
-
+    # Crop the XCT volumes using the adjusted bounding box
     mask_cropped = mask[:, minr_xct:maxr_xct, minc_xct:maxc_xct]
     onlypores_cropped = onlypores[:, minr_xct:maxr_xct, minc_xct:maxc_xct]
 
-    #UT
-
+    # UT processing: convert bounding box coordinates to UT resolution
     # Convert bounding box to UT resolution
     minr_ut = int(minr_xct * scaling_factor)
     minc_ut = int(minc_xct * scaling_factor)
     maxr_ut = int(maxr_xct * scaling_factor)
     maxc_ut = int(maxc_xct * scaling_factor)
 
-    ut_rf_cropped = ut_rf[:,minr_ut:maxr_ut, minc_ut:maxc_ut]
+    # Crop the UT volume using the converted coordinates
+    ut_rf_cropped = ut_rf[:, minr_ut:maxr_ut, minc_ut:maxc_ut]
 
     return onlypores_cropped, mask_cropped, ut_rf_cropped
 
-def patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size = 3, ut_step_size =1, xct_resolution = 0.025, ut_resolution = 1):
-
-    #compute xct patch size
+def patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size=3, ut_step_size=1, 
+          xct_resolution=0.025, ut_resolution=1):
+    """
+    Divide cropped images into patches for analysis.
+    
+    This function:
+    1. Converts UT patch dimensions to equivalent XCT dimensions
+    2. Crops all volumes to ensure they are divisible by patch sizes
+    3. Divides volumes into overlapping patches
+    4. Validates that UT and XCT patches are aligned
+    
+    Args:
+        onlypores_cropped (np.ndarray): Cropped XCT pore image (z, x, y)
+        mask_cropped (np.ndarray): Cropped XCT mask (z, x, y)  
+        ut_rf_cropped (np.ndarray): Cropped UT RF data (z, x, y)
+        ut_patch_size (int, optional): UT patch size in pixels. Defaults to 3.
+        ut_step_size (int, optional): UT step size in pixels. Defaults to 1.
+        xct_resolution (float, optional): XCT resolution in mm/pixel. Defaults to 0.025.
+        ut_resolution (float, optional): UT resolution in mm/pixel. Defaults to 1.
+        
+    Returns:
+        tuple: (patches_onlypores, patches_mask, patches_ut, original_shape)
+               Returns 0,0,0,0 if patch alignment fails
+               
+    Example:
+        >>> patches = patch(onlypores_crop, mask_crop, ut_crop, ut_patch_size=5)
+    """
+    # Compute equivalent XCT patch dimensions based on resolution scaling
     xct_patch_size = int(np.round(calculate_pixels(ut_resolution, xct_resolution, ut_patch_size)))
     xct_step_size = int(np.round(calculate_pixels(ut_resolution, xct_resolution, ut_step_size)))
 
-    #crop volumes to fit patch size division
+    # Crop volumes to ensure dimensions are divisible by patch sizes
     ut_rf_cropped = crop_image_to_patch_size(ut_rf_cropped, ut_patch_size)
     onlypores_cropped = crop_image_to_patch_size(onlypores_cropped, xct_patch_size)
     mask_cropped = crop_image_to_patch_size(mask_cropped, xct_patch_size)
 
-    #ensure patches are the same
+    # Ensure UT and XCT patches will have the same number of patches
     ut_shape = calculate_patch_shape(ut_rf_cropped.shape, ut_patch_size, ut_step_size)
     xct_shape = calculate_patch_shape(onlypores_cropped.shape, xct_patch_size, xct_step_size)
 
     if not (ut_shape[0] == xct_shape[0]):
         print('Patches are not the same')
-        return 0,0,0,0
+        return 0, 0, 0, 0
     
-    #divide into patches
+    # Divide volumes into patches
     patches_ut = divide_into_patches(ut_rf_cropped, ut_patch_size, ut_step_size)
 
     patches_onlypores = divide_into_patches(onlypores_cropped, xct_patch_size, xct_step_size)
+    # Note: Commented code below was for centering patches - kept for reference
     # center_size = int(patches_onlypores.shape[2] / ut_patch_size)
     # patches_onlypores = patches_onlypores[:, :, center_size:-center_size, center_size:-center_size]
-    patches_mask = divide_into_patches(mask_cropped,xct_patch_size, xct_step_size)
+    
+    patches_mask = divide_into_patches(mask_cropped, xct_patch_size, xct_step_size)
     # patches_mask = patches_mask[:, :, center_size:-center_size, center_size:-center_size]
 
     return patches_onlypores, patches_mask, patches_ut, ut_rf_cropped.shape
 
-def patch_2(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size = 3, ut_step_size = 1, beam_size = 3, xct_resolution = 0.025, ut_resolution = 1):
-    # Compute XCT patch size
-    xct_patch_size = int(np.round(calculate_pixels(ut_resolution, xct_resolution, ut_patch_size)))
-    xct_beam_size = int(np.round(calculate_pixels(ut_resolution, xct_resolution, beam_size)))
-    xct_step_size = int(np.round(calculate_pixels(ut_resolution, xct_resolution, ut_step_size)))
-
-    #crop volumes to fit patch size division
-    ut_rf_cropped = crop_image_to_patch_size(ut_rf_cropped, ut_patch_size)
-    onlypores_cropped = crop_image_to_patch_size(onlypores_cropped, xct_patch_size)
-    mask_cropped = crop_image_to_patch_size(mask_cropped, xct_patch_size)
-
-    #pad onlypores and mask to fit beam size division
-    pad = (xct_beam_size - xct_patch_size) // 2
-    onlypores_cropped = np.pad(onlypores_cropped, ((0, 0), (pad, pad), (pad, pad)), mode='constant')
-    mask_cropped = np.pad(mask_cropped, ((0, 0), (pad, pad), (pad, pad)), mode='constant')
-
-    #ensure patches are the same
-    ut_shape = calculate_patch_shape(ut_rf_cropped.shape, ut_patch_size, ut_step_size)
-    xct_shape = calculate_patch_shape(onlypores_cropped.shape, xct_beam_size, xct_step_size)
-
-    if not (ut_shape[0] == xct_shape[0]):
-        print('Patches are not the same')
-        return 0,0,0,0
-    
-    #divide into patches
-    patches_ut = divide_into_patches(ut_rf_cropped, ut_patch_size, ut_step_size)
-
-    patches_onlypores = divide_into_patches(onlypores_cropped, xct_beam_size, xct_step_size)
-    patches_mask = divide_into_patches(mask_cropped,xct_beam_size, xct_step_size)
-
-    return patches_onlypores, patches_mask, patches_ut
-
 def clean_material(sum_mask, volfrac, areafrac):
-
-    #get the value of a patch that is full material
+    """
+    Filter out patches with insufficient material content.
+    
+    This function identifies patches that contain less than 80% material and marks
+    their volume and area fractions as invalid (-1). This helps exclude patches
+    that are mostly background or edge regions.
+    
+    Args:
+        sum_mask (np.ndarray): Sum of mask values for each patch
+        volfrac (np.ndarray): Volume fraction values for each patch
+        areafrac (np.ndarray): Area fraction values for each patch
+        
+    Returns:
+        tuple: (cleaned_volfrac, cleaned_areafrac) with invalid patches marked as -1
+        
+    Example:
+        >>> volfrac_clean, areafrac_clean = clean_material(sum_mask, volfrac, areafrac)
+    """
+    # Get the value of a patch that is full material (maximum mask sum)
     full_material = np.max(sum_mask)
-    #get the percentage of material in each patch
-    mat_percentage = sum_mask/full_material
-    #the patches with less tahn 80% materail will be discarded
+    
+    # Calculate the percentage of material in each patch
+    mat_percentage = sum_mask / full_material
+    
+    # Mark patches with less than 80% material as invalid
     indexes = np.where(mat_percentage < 0.8)[0]
     volfrac[indexes] = -1
     areafrac[indexes] = -1
 
-    return volfrac,areafrac
-
-def clean_pores_3D(patches_onlypores):
-
-    # Function to process each slice
-    def process_slice(i, patches_onlypores): 
-        dilated_image = scipy.ndimage.binary_dilation(patches_onlypores[i], iterations=2) #dilate to group near pores
-        labeled_image = label(dilated_image) #label the image
-        #Now we get the indexes of the pixels that are not pores in the original image
-        indexes = np.where(patches_onlypores[i] == 0) 
-        #we delete the pixels that are not pores in the labeled image, because due to the dilation they are now labeled as pores
-        labeled_image[indexes] = 0
-        
-        properties = []  # To store properties for this slice
-        
-        # Loop over the labels and get the needed properties
-        for l in np.unique(labeled_image):
-            if l == 0 and (np.unique(label) != 1):
-                continue
-
-            # Get the mask of the label so we only process the region
-            indexes = np.where(labeled_image == l)
-            mask = np.zeros_like(labeled_image)
-            mask[indexes] = 1
-
-            #we do the projections in xy to get the major and minor axis and in xz to get the length in z
-            xyproj = np.max(mask, axis=0)
-            xzproj = np.max(mask, axis=1)
-
-            #now we get the first and last pixel in z to now the length of the pore in z 
-
-            # Find the indices of all non-zero elements
-            non_zero_indices = np.nonzero(xzproj)
-
-            if non_zero_indices[0].size == 0:  # Handle case where there are no non-zero elements
-                continue
-
-            # Extract the row indices
-            row_indices = non_zero_indices[0]
-
-            # Determine the first and last row with a labeled pixel
-            first_row = np.min(row_indices)
-            last_row = np.max(row_indices)
-
-            # Get properties in each projection
-            xyprops = regionprops(xyproj)
-            xzprops = [{'Z Length': last_row - first_row}]
-
-            #save the properties in a dictionary
-            for xy, xz in zip(xyprops, xzprops):
-                if l == 0:
-                    l = 1
-                properties.append({
-                    'Image Index': i,
-                    'Label': l,
-                    'xy Major Axis Length': xy.major_axis_length,
-                    'xy Minor Axis Length': xy.minor_axis_length,
-                    'Z Length': xz['Z Length'],
-                    'Solidity': xy.solidity
-                })
-            
-            if l == 0:
-                labeled_image[labeled_image == 0] = 1
-        
-        return labeled_image, properties
-
-    # Assuming proj_onlypores is already loaded as a numpy array
-    # proj_onlypores = ...
-
-    # Parallel processing of slices
-    results = Parallel(n_jobs=-1, backend='loky')(delayed(process_slice)(i, patches_onlypores) for i in range(patches_onlypores.shape[0]))
-
-    # Collect results
-    labeled_volume_onlypores, properties_list = zip(*results)
-
-    labeled_volume_onlypores = np.array(labeled_volume_onlypores)
-
-    # Convert the properties list to a pandas DataFrame
-    properties_df_3D = pd.DataFrame([item for sublist in properties_list for item in sublist])
-
-    #now clean the pores that are too small
-    #we dont want the pores that are smaller than 12 pixels in their major axis in xy
-
-    z_lengths = properties_df_3D['Z Length'].values
-
-    indexes = np.where(z_lengths < 0 )[0]
-
-    cleaned_labeled_patches_onlypores = np.copy(labeled_volume_onlypores)
-
-    for i in indexes:
-        row = properties_df_3D.iloc[i]
-        img_idx = int(row['Image Index'])
-        delete_indexes = np.where(labeled_volume_onlypores[img_idx] == row['Label'])
-        cleaned_labeled_patches_onlypores[img_idx][delete_indexes] = 0
-
-    cleaned_patches_onlypores = cleaned_labeled_patches_onlypores > 0
-
-    return cleaned_patches_onlypores
+    return volfrac, areafrac
 
 def layer_cleaning(mask_cropped, onlypores_cropped):
+    """
+    Remove pores from layers that cannot be detected by ultrasonic testing.
+    
+    This function identifies layer boundaries in the sample and removes pores from
+    the last few layers, as UT typically cannot detect pores very close to the
+    back wall due to physical limitations of the technique.
+    
+    Args:
+        mask_cropped (np.ndarray): Cropped mask defining the sample region (z, x, y)
+        onlypores_cropped (np.ndarray): Cropped XCT pore image (z, x, y)
+        
+    Returns:
+        np.ndarray: Cleaned pore image with back layers removed
+        
+    Example:
+        >>> cleaned_pores = layer_cleaning(mask_cropped, onlypores_cropped)
+    """
+    # Define layer thickness in mm and convert to pixels
+    layer_thickness = 0.508  # mm
+    layer_thickness = int(np.round(layer_thickness / 0.025))  # Convert to pixels
 
-    layer_thickness = 0.508 #mm
-
-    layer_thickness = int(np.round(layer_thickness / 0.025))
-
+    # Find front and back wall positions from mask
     indices = np.where(mask_cropped == 1)[0]
-
     frontwall = indices[0]
-
     backwall = indices[-1]
 
+    # Calculate layer edge positions
     edges = [frontwall]
 
     while True:
-
         edge = edges[-1]
-
         if edge + layer_thickness > backwall:
-
             break
-
         edges.append(edge + layer_thickness)
 
+    # Remove pores from the last two layers (UT cannot detect them)
     onlypores_cleaned = np.copy(onlypores_cropped)
-
-    #cleaning the last two layers because ut can't see them
-
     onlypores_cleaned[edges[-3]:] = 0
     
     return onlypores_cleaned
 
      
 
-def datasets1(patches_onlypores, patches_mask, patches_ut, folder, ut_patch_size):
+def create_dataset(patches_onlypores, patches_mask, patches_ut):
+    """
+    Create datasets from patches for machine learning training.
+    
+    This function processes patches to compute volumetric and area fractions of pores,
+    combines them with UT data, and creates a DataFrame dataset for machine learning models.
+    
+    The function computes:
+    - Volume fraction: ratio of pore volume to total material volume in each patch
+    - Area fraction: ratio of pore area to total material area in maximum projection
+    
+    Args:
+        patches_onlypores (np.ndarray): XCT pore patches (n_patches, z, x, y)
+        patches_mask (np.ndarray): XCT mask patches (n_patches, z, x, y)
+        patches_ut (np.ndarray): UT RF patches (n_patches, z, x, y)
+        
+    Returns:
+        pd.DataFrame: Generated DataFrame with UT features and pore fraction targets
+        
+    Example:
+        >>> df = create_dataset(pore_patches, mask_patches, ut_patches)
+    """
+    # Compute volume sums for each patch (sum over z-dimension)
+    sum_onlypores_patches = np.sum(patches_onlypores, axis=1)
+    sum_mask_patches = np.sum(patches_mask, axis=1)
 
-    #compute the sum of onlypores and mask
-    sum_onlypores_patches = np.sum(patches_onlypores, axis = 1)
-    sum_mask_patches = np.sum(patches_mask, axis = 1)
+    # Create maximum projections for area calculations
+    proj_onlypores = np.max(patches_onlypores, axis=1)
+    proj_mask = np.max(patches_mask, axis=1)
 
-    proj_onlypores = np.max(patches_onlypores, axis = 1)
-    proj_mask = np.max(patches_mask, axis = 1)
+    # Calculate volume fractions (3D analysis)
+    sum_onlypores = np.sum(sum_onlypores_patches, axis=(1, 2))
+    sum_mask = np.sum(sum_mask_patches, axis=(1, 2))
 
-    #######volfrac for patch vs volfrac dataset
-
-    sum_onlypores = np.sum(sum_onlypores_patches, axis = (1,2))
-    sum_mask = np.sum(sum_mask_patches, axis = (1,2))
-
-    #the points that are zero in the mask are not material, so we set them to -1 in volfrac to know that they are not material
-
+    # Handle division by zero and mark non-material regions
     zero_indices = np.where(sum_mask == 0)
-
     volfrac = sum_onlypores / (sum_mask + 1e-6)
-
     volfrac[zero_indices] = -1
 
-    #areafrac
-    sum_onlypores_area = np.sum(proj_onlypores, axis = (1,2)).astype(np.int16)
-    sum_mask_area = np.sum(proj_mask, axis = (1,2)).astype(np.int16)
+    # Calculate area fractions (2D projections)
+    sum_onlypores_area = np.sum(proj_onlypores, axis=(1, 2)).astype(np.int16)
+    sum_mask_area = np.sum(proj_mask, axis=(1, 2)).astype(np.int16)
 
     areafrac = sum_onlypores_area / (sum_mask_area + 1e-6)
-
     zero_indices = np.where(sum_mask_area == 0)
-
     areafrac[zero_indices] = -1
 
-    #clean volfrac and areafrac
+    # Clean fractions by removing patches with insufficient material
     volfrac, areafrac = clean_material(sum_mask, volfrac, areafrac)
 
-    #prepare ut for dataframe
-
+    # Prepare UT data for DataFrame (reshape from 3D patches to 1D feature vectors)
     ut_patches_reshaped = patches_ut.transpose(0, 2, 3, 1)
-
     ut_patches_reshaped = ut_patches_reshaped.reshape(ut_patches_reshaped.shape[0], -1)
 
-    #create both dataframes
-
-    #column names for ut
-
+    # Create column names for UT features
     columns_ut = []
-
     for i in range(ut_patches_reshaped.shape[1]):
         columns_ut.append(f'ut_rf_{i}')
-
     columns_ut = np.array(columns_ut)
 
-    #dataframe for patch vs volfrac dataset
+    # Combine UT features with target variables (volfrac and areafrac)
+    patch_vs_volfrac = np.hstack((ut_patches_reshaped, volfrac.reshape(-1, 1), areafrac.reshape(-1, 1)))
 
-    patch_vs_volfrac = np.hstack((ut_patches_reshaped, volfrac.reshape(-1,1), areafrac.reshape(-1,1)))
+    # Create DataFrame with appropriate column names
+    df_patch_vs_volfrac = pd.DataFrame(patch_vs_volfrac, 
+                                     columns=np.append(columns_ut, ['volfrac', 'areafrac']))
 
-    df_patch_vs_volfrac = pd.DataFrame(patch_vs_volfrac, columns = np.append(columns_ut, ['volfrac','areafrac']))
+    return df_patch_vs_volfrac
 
-    #save the dataframes
-
-    save_path = folder / ('patch_vs_volfrac_' + str(ut_patch_size) + '.csv')
-
-    df_patch_vs_volfrac.to_csv(save_path, index = False)
-
-    return df_patch_vs_volfrac, save_path
-
-def main(onlypores,mask,ut_rf,folder, xct_resolution = 0.025, ut_resolution = 1,ut_patch_size = 3, ut_step_size =1):
-    from time import time
+def main(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1, 
+         ut_patch_size=3, ut_step_size=1):
+    """
+    Main pipeline for creating UT vs XCT datasets.
+    
+    This function orchestrates the complete workflow for creating machine learning
+    datasets from UT and XCT data:
+    1. Preprocessing to align coordinate systems and crop regions of interest
+    3. Patching both UT and XCT data into analysis windows
+    4. Optional pore cleaning (currently commented out)
+    5. Dataset creation with volume and area fraction targets
+    
+    Args:
+        onlypores (np.ndarray): 3D XCT image showing only pores (z, x, y)
+        mask (np.ndarray): 3D XCT mask defining sample boundaries (z, x, y)
+        ut_rf (np.ndarray): 3D UT radiofrequency data (z, x, y)
+        xct_resolution (float, optional): XCT pixel resolution in mm. Defaults to 0.025.
+        ut_resolution (float, optional): UT pixel resolution in mm. Defaults to 1.
+        ut_patch_size (int, optional): UT patch size in pixels. Defaults to 3.
+        ut_step_size (int, optional): UT step size for patch overlap. Defaults to 1.
+        
+    Returns:
+        tuple: (original_shape, num_samples, dataframe)
+               - original_shape: Shape of the original cropped UT data
+               - num_samples: Number of patches/samples in the dataset
+               - dataframe: The generated DataFrame with UT features and targets
+               
+    Example:
+        >>> shape, n_samples, df = main(onlypores, mask, ut_rf, output_folder)
+        >>> print(f"Created {n_samples} samples")
+    """
+    
     print('Preprocessing and patching the images...')
-    #preprocess the images
-    onlypores_cropped, mask_cropped, ut_rf_cropped = preprocess(onlypores,mask,ut_rf, xct_resolution, ut_resolution)    
-    print('Layer cleaning')
-    # onlypores_cropped = layer_cleaning(mask_cropped, onlypores_cropped)
+    # Step 1: Preprocess images to align coordinate systems and crop ROI
+    onlypores_cropped, mask_cropped, ut_rf_cropped = preprocess(
+        onlypores, mask, ut_rf, xct_resolution, ut_resolution)    
+    
     print('Patching the images...')
-    #patch the images
-    patches_onlypores, patches_mask, patches_ut, shape = patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size, ut_step_size, xct_resolution, ut_resolution)
+    # Step 3: Divide images into patches for analysis
+    patches_onlypores, patches_mask, patches_ut, shape = patch(
+        onlypores_cropped, mask_cropped, ut_rf_cropped, 
+        ut_patch_size, ut_step_size, xct_resolution, ut_resolution)
+    
     print('Cleaning the pores...')
+    # Step 4: Optional pore cleaning (currently commented out)
     # patches_onlypores = clean_pores_3D(patches_onlypores)
+    
     print('Creating the datasets...')
-    #create the datasets
-    df, save_path = datasets1(patches_onlypores, patches_mask, patches_ut, folder,ut_patch_size)
+    # Step 5: Create final dataset with features and targets
+    df = create_dataset(patches_onlypores, patches_mask, patches_ut)
 
-    return shape, len(df), save_path
+    return shape, df
