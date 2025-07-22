@@ -1,3 +1,4 @@
+from matplotlib import pyplot as plt
 import numpy as np
 import cv2
 from scipy.signal import find_peaks
@@ -21,7 +22,7 @@ def UT_surface_coordinates(volume_UT, signal_percentage=1.0):
     Parameters
     ----------
     volume_UT : numpy.ndarray
-        3D ultrasound volume with shape (Z, Y, X), where:
+        3D ultrasound volume with shape (X, Y, Z), where:
         - Z is the depth or scan axis,
         - Y is the vertical axis (height),
         - X is the horizontal axis (width).
@@ -35,7 +36,7 @@ def UT_surface_coordinates(volume_UT, signal_percentage=1.0):
     -------
     numpy.ndarray
         Array of surface points with shape (N, 3), where each row contains
-        the coordinates (z, y, x) of a detected surface point.
+        the coordinates (x, y, z) of a detected surface point.
         
     Raises
     ------
@@ -57,7 +58,7 @@ def UT_surface_coordinates(volume_UT, signal_percentage=1.0):
     z_max = volume_UT.shape[0]
     z_limit = int(z_max * signal_percentage)
     
-    surface_coords = []  # List to store (z, y, x) surface coordinates
+    surface_coords = []  # List to store (x, y, z) surface coordinates
 
     # Loop over each x-y location in the volume
     for x in range(x_max):
@@ -72,7 +73,7 @@ def UT_surface_coordinates(volume_UT, signal_percentage=1.0):
                 # Find the depth (z) at which the maximum intensity occurs
                 z = np.argmax(A_scan)
                 # Store the 3D coordinates of this surface point
-                surface_coords.append((z, y, x))
+                surface_coords.append((x, y, z))
 
     # Check if any surface points were found
     if not surface_coords:
@@ -94,7 +95,7 @@ def XCT_surface_coordinates(volume_XCT, signal_percentage=1.0):
     Parameters
     ----------
     volume_XCT : numpy.ndarray
-        3D XCT volume with shape (Z, Y, X), where:
+        3D XCT volume with shape (X, Y, Z), where:
         - Z is the depth or scan axis,
         - Y is the vertical axis (height),
         - X is the horizontal axis (width).
@@ -108,7 +109,7 @@ def XCT_surface_coordinates(volume_XCT, signal_percentage=1.0):
     -------
     numpy.ndarray
         Array of surface points with shape (N, 3), where each row contains
-        the coordinates (z, y, x) of a detected surface point.
+        the coordinates (x, y, z) of a detected surface point.
         
     Raises
     ------
@@ -153,7 +154,7 @@ def XCT_surface_coordinates(volume_XCT, signal_percentage=1.0):
         # If at least one peak was found, store the first one as the surface point
         if len(peaks) > 0:
             z = peaks[0]  # Take the first peak (closest to the surface)
-            surface_coords.append((z, y, x))
+            surface_coords.append((x, y, z))
             
     # Check if any surface points were found
     if not surface_coords:
@@ -176,7 +177,7 @@ def XCT_surface_coordinates_2(volume_XCT, signal_percentage=1.0):
     Parameters
     ----------
     volume_XCT : numpy.ndarray
-        3D XCT volume with shape (Z, Y, X), where:
+        3D XCT volume with shape (X, Y, Z), where:
         - Z is the depth or scan axis,
         - Y is the vertical axis (height),
         - X is the horizontal axis (width).
@@ -190,7 +191,7 @@ def XCT_surface_coordinates_2(volume_XCT, signal_percentage=1.0):
     -------
     numpy.ndarray
         Array of surface points with shape (N, 3), where each row contains
-        the coordinates (z, y, x) of a detected surface point.
+        the coordinates (x, y, z) of a detected surface point.
 
     Notes
     -----
@@ -234,7 +235,7 @@ def XCT_surface_coordinates_2(volume_XCT, signal_percentage=1.0):
         z = np.argmax(signal > 0)
 
         # Store the 3D coordinates of this surface point
-        surface_coords.append((z, y, x))
+        surface_coords.append((x, y, z))
         
     # Convert list of points to numpy array
     return np.array(surface_coords)
@@ -252,7 +253,7 @@ def YZ_XZ_inclination(volume, volumeType='XCT', signal_percentage=1.0):
     Parameters
     ----------
     volume : numpy.ndarray
-        3D image volume with shape (Z, Y, X), where:
+        3D image volume with shape (X, Y, Z), where:
         - Z is the depth or scan axis,
         - Y is the vertical axis (height),
         - X is the horizontal axis (width).
@@ -508,7 +509,7 @@ def label_objects(image):
     """
     labeled_image, num_features = label(image)
     output_image = np.zeros_like(image)
-    
+
     # Get all non-zero pixel coordinates
     indices = np.where(labeled_image > 0)
     indices = list(zip(indices[0], indices[1]))
@@ -517,7 +518,7 @@ def label_objects(image):
     top_object = min(indices, key=lambda x: x[0])
     output_image[top_object] = 100
     indices.remove(top_object)
-    
+
     if indices:
         # Label the object nearest to the left edge (smallest column index)
         left_object = min(indices, key=lambda x: x[1])
@@ -599,7 +600,7 @@ def ut_preprocessing(ut):
     Parameters
     ----------
     ut : numpy.ndarray
-        3D ultrasound volume with shape (Z, Y, X) where Z is the depth
+        3D ultrasound volume with shape (X, Y, Z) where Z is the depth
         axis and Y, X are the spatial dimensions.
     
     Returns
@@ -674,7 +675,7 @@ def xct_preprocessing(xct, original_resolution=0.025, new_resolution=1.0):
     Parameters
     ----------
     xct : numpy.ndarray
-        3D X-ray CT volume with shape (Z, Y, X) where Z is the depth
+        3D X-ray CT volume with shape (X, Y, Z) where Z is the depth
         axis and Y, X are the spatial dimensions.
     original_resolution : float, optional
         Original pixel size of the XCT data in real-world units
@@ -877,7 +878,7 @@ def scale_transformation_matrix(transformation_matrix, scale_factor):
 
     return scaled_transformation_matrix
 
-def apply_transform_parameters_sequential(matrix, ut, xct, original_resolution=0.025):
+def apply_transform_parameters_sequential(matrix, ut, xct, ut_resolution=1, xct_resolution=0.025):
     """
     Apply transformation matrix to XCT volume sequentially slice by slice.
     
@@ -891,9 +892,9 @@ def apply_transform_parameters_sequential(matrix, ut, xct, original_resolution=0
         3x3 or 2x3 transformation matrix defining the affine transformation
         to apply to each XY slice of the volume.
     ut : numpy.ndarray
-        UT volume used as reference for output dimensions, with shape (Z, Y, X).
+        UT volume used as reference for output dimensions, with shape (X, Y, Z).
     xct : numpy.ndarray
-        XCT volume to be transformed, with shape (Z, Y, X) for 3D volumes
+        XCT volume to be transformed, with shape (X, Y, Z) for 3D volumes
         or (Y, X) for 2D images.
     original_resolution : float, optional
         Original pixel resolution of the XCT data in real-world units.
@@ -915,13 +916,13 @@ def apply_transform_parameters_sequential(matrix, ut, xct, original_resolution=0
     maintaining the same real-world dimensions as the UT reference volume.
     """
     # Calculate output dimensions based on resolution scaling
-    big_shape = calculate_new_dimensions(1, original_resolution, ut.shape[:2])
+    big_shape = calculate_new_dimensions(ut_resolution, xct_resolution, ut.shape[:2])
 
     transformed_volume = []
 
     if len(xct.shape) == 3:
         # Process 3D volume slice by slice
-        for i in range(xct.shape[2]):
+        for i in tqdm(range(xct.shape[2]), desc="Transforming slices",total=xct.shape[2]):
             # Apply transformation to each XY slice
             transformed_slice = scipy.ndimage.affine_transform(
                 xct[:, :, i], matrix[:2, :], output_shape=big_shape
@@ -930,8 +931,6 @@ def apply_transform_parameters_sequential(matrix, ut, xct, original_resolution=0
         
         # Convert list to numpy array and rearrange axes
         transformed_volume = np.array(transformed_volume)
-        transformed_volume = np.swapaxes(transformed_volume, 0, 1)
-        transformed_volume = np.swapaxes(transformed_volume, 1, 2)
 
         return transformed_volume
     else:
@@ -944,12 +943,10 @@ def apply_transform_parameters_sequential(matrix, ut, xct, original_resolution=0
 
         # Convert and rearrange axes
         transformed_volume = np.array(transformed_volume)
-        transformed_volume = np.swapaxes(transformed_volume, 0, 1)
-        transformed_volume = np.swapaxes(transformed_volume, 1, 2)
 
         return transformed_volume[:, :, 0]
 
-def apply_transform_parameters_paralel(matrix, ut, xct, original_resolution=0.025):
+def apply_transform_parameters_paralel(matrix, ut, xct, ut_resolution=1, xct_resolution=0.025):
     """
     Apply transformation matrix to XCT volume using parallel processing.
     
@@ -963,9 +960,9 @@ def apply_transform_parameters_paralel(matrix, ut, xct, original_resolution=0.02
         3x3 or 2x3 transformation matrix defining the affine transformation
         to apply to each XY slice of the volume.
     ut : numpy.ndarray
-        UT volume used as reference for output dimensions, with shape (Z, Y, X).
+        UT volume used as reference for output dimensions, with shape (X, Y, Z).
     xct : numpy.ndarray
-        XCT volume to be transformed, with shape (Z, Y, X).
+        XCT volume to be transformed, with shape (X, Y, Z).
     original_resolution : float, optional
         Original pixel resolution of the XCT data in real-world units.
         Default is 0.025.
@@ -985,7 +982,7 @@ def apply_transform_parameters_paralel(matrix, ut, xct, original_resolution=0.02
     track the transformation progress across all slices.
     """
     # Calculate output dimensions based on resolution scaling
-    big_shape = calculate_new_dimensions(1, original_resolution, ut.shape[:2])
+    big_shape = calculate_new_dimensions(ut_resolution, xct_resolution, ut.shape[:2])
 
     def func(slice, matrix, shape):
         """Apply affine transform to a single slice."""
@@ -1001,16 +998,16 @@ def apply_transform_parameters_paralel(matrix, ut, xct, original_resolution=0.02
     n_slices = xct.shape[2]  # Number of slices in the Z dimension
 
     # Apply transformation to all slices in parallel
-    transformed_slices = Parallel(n_jobs=n_jobs)(
-        delayed(process_slice)(z, xct, matrix[:2, :], big_shape) for z in range(n_slices)
+    transformed_volume = Parallel(n_jobs=n_jobs)(
+        delayed(process_slice)(z, xct, matrix[:2, :], big_shape) for z in tqdm(range(n_slices), desc="Transforming slices", total=n_slices)
     )
 
     # Reassemble the transformed slices into the final 3D array
-    transformed_volume = np.stack(transformed_slices, axis=2)
+    transformed_volume = np.stack(transformed_volume, axis=2)
 
     return transformed_volume
 
-def apply_transform_parameters(matrix, ut, xct, original_resolution=0.025, parallel=False):
+def apply_transform_parameters(matrix, ut, xct, ut_resolution=1, xct_resolution=0.025, parallel=False):
     """
     Apply transformation matrix to XCT volume with choice of processing method.
     
@@ -1024,9 +1021,9 @@ def apply_transform_parameters(matrix, ut, xct, original_resolution=0.025, paral
         3x3 or 2x3 transformation matrix defining the affine transformation
         to apply to each XY slice of the volume.
     ut : numpy.ndarray
-        UT volume used as reference for output dimensions, with shape (Z, Y, X).
+        UT volume used as reference for output dimensions, with shape (X, Y, Z).
     xct : numpy.ndarray
-        XCT volume to be transformed, with shape (Z, Y, X) for 3D volumes
+        XCT volume to be transformed, with shape (X, Y, Z) for 3D volumes
         or (Y, X) for 2D images.
     original_resolution : float, optional
         Original pixel resolution of the XCT data in real-world units.
@@ -1054,9 +1051,9 @@ def apply_transform_parameters(matrix, ut, xct, original_resolution=0.025, paral
     - Memory usage needs to be minimized
     """
     if parallel:
-        return apply_transform_parameters_paralel(matrix, ut, xct, original_resolution)
+        return apply_transform_parameters_paralel(matrix, ut, xct, ut_resolution, xct_resolution)
     else:
-        return apply_transform_parameters_sequential(matrix, ut, xct, original_resolution)
+        return apply_transform_parameters_sequential(matrix, ut, xct, ut_resolution, xct_resolution)
 
 def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_resolution = 0.025):
     """
@@ -1070,10 +1067,10 @@ def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_re
     Parameters
     ----------
     ut : numpy.ndarray
-        3D ultrasound volume with shape (Z, Y, X) where Z is the depth
+        3D ultrasound volume with shape (X, Y, Z) where Z is the depth
         axis and Y, X are the spatial dimensions.
     xct : numpy.ndarray
-        3D X-ray CT volume with shape (Z, Y, X) where Z is the depth
+        3D X-ray CT volume with shape (X, Y, Z) where Z is the depth
         axis and Y, X are the spatial dimensions.
     
     Returns
@@ -1121,9 +1118,11 @@ def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_re
     ut_centers = label_objects(ut_preprocessing(ut))
     xct_centers = label_objects(xct_preprocessing(xct,original_resolution = registered_resolution, new_resolution = reference_resolution))
 
+
     # Extract point coordinates and intensity values from labeled images
     ut_points = extract_points(ut_centers)
     xct_points = extract_points(xct_centers)
+
 
     # Sort points by their intensity labels to ensure correspondence
     sorted_indices_ut = np.argsort(ut_points[:, -1])
@@ -1171,7 +1170,7 @@ def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_re
 
     return parameters, ut_centers, xct_centers, transformed_xct_centers
 
-def apply_registration(ut, xct, parameters):
+def apply_registration(ut, xct, parameters, ut_resolution, xct_resolution, parallel=False):
     """
     Apply pre-computed registration parameters to align XCT volume with UT volume.
     
@@ -1182,10 +1181,10 @@ def apply_registration(ut, xct, parameters):
     Parameters
     ----------
     ut : numpy.ndarray
-        Reference UT volume with shape (Z, Y, X) used to determine output
+        Reference UT volume with shape (X, Y, Z) used to determine output
         dimensions and coordinate system.
     xct : numpy.ndarray
-        XCT volume to be transformed and registered, with shape (Z, Y, X).
+        XCT volume to be transformed and registered, with shape (X, Y, Z).
     parameters : numpy.ndarray
         3x3 transformation matrix obtained from the registration process,
         containing rotation, translation, and scaling components.
@@ -1212,7 +1211,7 @@ def apply_registration(ut, xct, parameters):
     print('Applying transformation')
 
     # Apply the transformation matrix to the entire XCT volume
-    transformed_volume = apply_transform_parameters(transformation_matrix, ut, xct)
+    transformed_volume = apply_transform_parameters(transformation_matrix, ut, xct, ut_resolution, xct_resolution, parallel)
 
     print('Transformation applied')
 

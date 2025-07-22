@@ -284,11 +284,16 @@ def patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size=3, ut_st
         ut_resolution (float, optional): UT resolution in mm/pixel. Defaults to 1.
         
     Returns:
-        tuple: (patches_onlypores, patches_mask, patches_ut, original_shape)
+        tuple: (patches_onlypores, patches_mask, patches_ut, patch_grid_shape)
                Returns 0,0,0,0 if patch alignment fails
+               - patches_onlypores: XCT pore patches array
+               - patches_mask: XCT mask patches array  
+               - patches_ut: UT RF patches array
+               - patch_grid_shape: (num_patches_h, num_patches_w) for volfrac reconstruction
                
     Example:
         >>> patches = patch(onlypores_crop, mask_crop, ut_crop, ut_patch_size=5)
+        >>> pore_patches, mask_patches, ut_patches, grid_shape = patches
     """
     # Compute equivalent XCT patch dimensions based on resolution scaling
     xct_patch_size = int(np.round(calculate_pixels(ut_resolution, xct_resolution, ut_patch_size)))
@@ -318,13 +323,18 @@ def patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size=3, ut_st
     patches_mask = divide_into_patches(mask_cropped, xct_patch_size, xct_step_size)
     # patches_mask = patches_mask[:, :, center_size:-center_size, center_size:-center_size]
 
-    return patches_onlypores, patches_mask, patches_ut, ut_rf_cropped.shape
+    # Calculate patch grid shape for reconstructing volfrac image from flat dataset
+    num_patches_h = ((ut_rf_cropped.shape[1] - ut_patch_size) // ut_step_size) + 1
+    num_patches_w = ((ut_rf_cropped.shape[2] - ut_patch_size) // ut_step_size) + 1
+    patch_grid_shape = (num_patches_h, num_patches_w)
 
-def clean_material(sum_mask, volfrac, areafrac):
+    return patches_onlypores, patches_mask, patches_ut, patch_grid_shape
+
+def clean_material(sum_mask, volfrac, areafrac, material_threshold=0.8):
     """
     Filter out patches with insufficient material content.
-    
-    This function identifies patches that contain less than 80% material and marks
+
+    This function identifies patches that contain less than the specified material threshold and marks
     their volume and area fractions as invalid (-1). This helps exclude patches
     that are mostly background or edge regions.
     
@@ -332,6 +342,7 @@ def clean_material(sum_mask, volfrac, areafrac):
         sum_mask (np.ndarray): Sum of mask values for each patch
         volfrac (np.ndarray): Volume fraction values for each patch
         areafrac (np.ndarray): Area fraction values for each patch
+        material_threshold (float, optional): Threshold for valid material content. Defaults to 0.8.
         
     Returns:
         tuple: (cleaned_volfrac, cleaned_areafrac) with invalid patches marked as -1
@@ -344,9 +355,9 @@ def clean_material(sum_mask, volfrac, areafrac):
     
     # Calculate the percentage of material in each patch
     mat_percentage = sum_mask / full_material
-    
-    # Mark patches with less than 80% material as invalid
-    indexes = np.where(mat_percentage < 0.8)[0]
+
+    # Mark patches with less than the specified material threshold as invalid
+    indexes = np.where(mat_percentage < material_threshold)[0]
     volfrac[indexes] = -1
     areafrac[indexes] = -1
 
@@ -439,6 +450,7 @@ def create_dataset(patches_onlypores, patches_mask, patches_ut):
     sum_onlypores_area = np.sum(proj_onlypores, axis=(1, 2)).astype(np.int16)
     sum_mask_area = np.sum(proj_mask, axis=(1, 2)).astype(np.int16)
 
+    # Handle division by zero and mark non-material regions
     areafrac = sum_onlypores_area / (sum_mask_area + 1e-6)
     zero_indices = np.where(sum_mask_area == 0)
     areafrac[zero_indices] = -1
@@ -465,7 +477,7 @@ def create_dataset(patches_onlypores, patches_mask, patches_ut):
 
     return df_patch_vs_volfrac
 
-def main(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1, 
+def main(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1.0, 
          ut_patch_size=3, ut_step_size=1):
     """
     Main pipeline for creating UT vs XCT datasets.
@@ -487,14 +499,14 @@ def main(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1,
         ut_step_size (int, optional): UT step size for patch overlap. Defaults to 1.
         
     Returns:
-        tuple: (original_shape, num_samples, dataframe)
-               - original_shape: Shape of the original cropped UT data
-               - num_samples: Number of patches/samples in the dataset
+        tuple: (patch_grid_shape, dataframe)
+               - patch_grid_shape: (num_patches_h, num_patches_w) for reconstructing volfrac image
                - dataframe: The generated DataFrame with UT features and targets
                
     Example:
-        >>> shape, n_samples, df = main(onlypores, mask, ut_rf, output_folder)
-        >>> print(f"Created {n_samples} samples")
+        >>> grid_shape, df = main(onlypores, mask, ut_rf)
+        >>> volfrac_flat = df['volfrac'].values
+        >>> volfrac_image = volfrac_flat.reshape(grid_shape)
     """
     
     print('Preprocessing and patching the images...')
@@ -504,7 +516,7 @@ def main(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1,
     
     print('Patching the images...')
     # Step 3: Divide images into patches for analysis
-    patches_onlypores, patches_mask, patches_ut, shape = patch(
+    patches_onlypores, patches_mask, patches_ut, patch_grid_shape = patch(
         onlypores_cropped, mask_cropped, ut_rf_cropped, 
         ut_patch_size, ut_step_size, xct_resolution, ut_resolution)
     
@@ -516,4 +528,4 @@ def main(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1,
     # Step 5: Create final dataset with features and targets
     df = create_dataset(patches_onlypores, patches_mask, patches_ut)
 
-    return shape, df
+    return patch_grid_shape, df

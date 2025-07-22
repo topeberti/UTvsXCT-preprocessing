@@ -618,6 +618,8 @@ def clean_pores(onlypores, min_size=8):
     # Create output array for components meeting all criteria
     cleaned_pores = np.zeros_like(onlypores, dtype=bool)
     valid_components = 0
+
+    pore_labels = []
     
     for prop in props:
         # Extract bounding box coordinates: (min_z, min_y, min_x, max_z, max_y, max_x)
@@ -632,9 +634,14 @@ def clean_pores(onlypores, min_size=8):
         # This prevents retention of flat planes or linear artifacts
         if z_extent >= 2 and y_extent >= 2 and x_extent >= 2:
             # Component meets all criteria - add to cleaned result
-            cleaned_pores[labeled_pores == prop.label] = True
+            pore_labels.append(prop.label)
             valid_components += 1
-    
+
+    print(f'  Valid components after dimensional filtering: {valid_components}')
+
+    #cleaning the pores based on valid labels
+    cleaned_pores[np.isin(labeled_pores, pore_labels)] = True
+
     print(f'  Components after dimensional filtering: {valid_components}')
     print(f'  Total pore voxels retained: {np.sum(cleaned_pores)}')
     

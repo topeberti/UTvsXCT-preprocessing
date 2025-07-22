@@ -43,8 +43,10 @@ def envelope(volume):
     which can highlight features like peaks in ultrasonic testing data.
     """
 
-    # Convert to int16 to center in 0
-    volume = volume.astype(np.int16)
+    # Convert to int16 to center in 0 if dtype is not already int16 or int32
+    if volume.dtype not in [np.int16, np.int32]:
+        # Convert to int16, which is suitable for signal processing
+        volume = volume.astype(np.int16)
 
     # Center the data by subtracting the mean to center in 0
     volume = volume - volume.mean()
