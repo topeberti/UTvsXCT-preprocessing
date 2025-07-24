@@ -4,6 +4,41 @@ from scipy.ndimage import rotate
 from scipy.signal import find_peaks
 from tqdm import tqdm  # Progress bar for long operations
 
+def rotate_xct_to_ut(volume_xct, volume_ut):
+    """
+    Rotates the XCT volume to align with the UT volume in the YZ and XZ planes.
+
+    This function calculates the inclination angles of both the XCT and UT volumes 
+    in the YZ and XZ planes. It then computes the required rotation angles and 
+    applies them to the XCT volume to align it with the UT volume.
+
+    Parameters:
+    ----------
+    volume_xct : numpy.ndarray
+        The 3D XCT scan volume to be rotated.
+
+    volume_ut : numpy.ndarray
+        The 3D UT scan volume used as the alignment reference.
+
+    Returns:
+    -------
+    numpy.ndarray
+        The rotated XCT volume, aligned with the UT volume.
+    """
+
+    # Rotation in the YZ plane
+    angle_yz_ut, _ = YZ_XZ_inclination(volume_ut, volumeType='UT')
+    angle_yz_xct, _ = YZ_XZ_inclination(volume_xct, volumeType='XCT')
+    needed_angle_yz = angle_yz_ut - angle_yz_xct
+    rotated_in_yz = rotate(volume_xct, angle=-needed_angle_yz, axes=(0, 1), reshape=True)
+
+    # Rotation in the XZ plane
+    _, angle_xz_ut = YZ_XZ_inclination(volume_ut, volumeType='UT')
+    _, angle_xz_xct = YZ_XZ_inclination(volume_xct, volumeType='XCT')
+    needed_angle_xz = angle_xz_ut - angle_xz_xct
+    rotated_volume = rotate(rotated_in_yz, angle=-needed_angle_xz, axes=(0, 2), reshape=True)
+
+    return rotated_volume
 def rotate_volume(volume):
     """
     Rotates a 3D volume to align it based on estimated angles.
