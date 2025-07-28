@@ -114,6 +114,8 @@ def align_volume_xy(volume,parallel=True,cval=40):
 
     angle_yz, angle_xz = register.YZ_XZ_inclination(volume,'XCT')
 
+    print(f"Aligning volume with angles: YZ={angle_yz} degrees, XZ={angle_xz} degrees")
+
     # Rotate around Y axis to align YZ plane
     volume = rotate_volume_axis(volume, 'x', angle_yz, n_jobs=-1, cval=cval, parallel=parallel)
     # Rotate around X axis to align XZ plane
@@ -422,7 +424,7 @@ def main(volume, crop=False, cval=-1):
     6. Optionally crops the volume to remove non-material regions at front and back
     
     Args:
-        volume (numpy.ndarray): 3D uint8 volume with axes (x,y,z) to be processed.
+        volume (numpy.ndarray): 3D uint8 volume with axes (z,y,x) to be processed.
         crop (bool): If True, crop the volume to remove non-material regions at front/back walls.
                     If False, only alignment and centering are performed.
         order (int): Interpolation order for the affine transformation:
@@ -441,22 +443,14 @@ def main(volume, crop=False, cval=-1):
         # Use minimum value from central slice as background fill value
         cval = volume[volume.shape[0] // 2, volume.shape[1] // 2].min()
 
-    #reslice so the volume is in (z,y,x) format
-    volume = reslicer.rotate_90(volume, clockwise=True)
-    volume = reslicer.reslice(volume, 'Top')
-
     # Align the volume so principal axes match coordinate axes (PCA-based alignment)
     volume = align_volume_xy(volume, cval=cval)
-
-    #undo the reslicing so the volume is back in (x,y,z) format
-    volume = reslicer.reslice(volume, 'Bottom')
-    volume = reslicer.rotate_90(volume, clockwise=False)
 
     # Generate a new mask for the aligned volume (needed since volume geometry changed)
     mask = onlypores.material_mask(volume)
 
     # Center the volume by cropping to the bounding box of the material
-    volume, mask = centering(volume, mask)
+    volume, _ = centering(volume, mask)
 
     # Return the centered volume if cropping is not requested
     if not crop:

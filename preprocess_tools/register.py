@@ -95,7 +95,7 @@ def XCT_surface_coordinates(volume_XCT, signal_percentage=1.0):
     Parameters
     ----------
     volume_XCT : numpy.ndarray
-        3D XCT volume with shape (X, Y, Z), where:
+        3D XCT volume with shape (Z, Y, X), where:
         - Z is the depth or scan axis,
         - Y is the vertical axis (height),
         - X is the horizontal axis (width).
@@ -109,7 +109,7 @@ def XCT_surface_coordinates(volume_XCT, signal_percentage=1.0):
     -------
     numpy.ndarray
         Array of surface points with shape (N, 3), where each row contains
-        the coordinates (x, y, z) of a detected surface point.
+        the coordinates (z, y, x) of a detected surface point.
         
     Raises
     ------
@@ -154,7 +154,7 @@ def XCT_surface_coordinates(volume_XCT, signal_percentage=1.0):
         # If at least one peak was found, store the first one as the surface point
         if len(peaks) > 0:
             z = peaks[0]  # Take the first peak (closest to the surface)
-            surface_coords.append((x, y, z))
+            surface_coords.append((z, y, x))
             
     # Check if any surface points were found
     if not surface_coords:
@@ -253,7 +253,7 @@ def YZ_XZ_inclination(volume, volumeType='XCT', signal_percentage=1.0):
     Parameters
     ----------
     volume : numpy.ndarray
-        3D image volume with shape (X, Y, Z), where:
+        3D image volume with shape (Z, Y, X), where:
         - Z is the depth or scan axis,
         - Y is the vertical axis (height),
         - X is the horizontal axis (width).

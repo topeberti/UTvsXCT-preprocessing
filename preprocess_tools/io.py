@@ -33,7 +33,7 @@ def read_sequence(folder_path):
     
     return np.array(volume)
 
-def write_sequence(folder_path, name, volume):
+def write_sequence(folder_path, volume):
     """
     Save a 3D volume as a sequence of TIFF files in a folder.
     
@@ -43,7 +43,7 @@ def write_sequence(folder_path, name, volume):
     volume (numpy.ndarray): A 3D array where each slice corresponds to an image.
     """
 
-    folder_path = folder_path / name
+    folder_path = folder_path 
 
     # Create the folder if it doesn't exist
     Path(folder_path).mkdir(parents=True, exist_ok=True)
@@ -51,7 +51,7 @@ def write_sequence(folder_path, name, volume):
     # Save each slice as a TIFF file with progress bar
     with tqdm(total=volume.shape[0], desc="Saving") as pbar:
         for i in range(volume.shape[0]):
-            tifffile.imwrite(f"{folder_path}/{name}_{i:04d}.tif", volume[i])
+            tifffile.imwrite(f"{folder_path}/{i:04d}.tif", volume[i])
             pbar.update(1)
     
     print("Saving complete.")
@@ -125,7 +125,7 @@ def save_tif(path, volume):
     # Check if the path is a directory or a file
     if os.path.isdir(path):
         # If it's a directory, save the volume as a sequence of TIFF files
-        write_sequence(path, "output", volume)
+        write_sequence(path, volume)
     else:
         # If it's a file, save the single TIFF file
         tifffile.imwrite(path, volume)
