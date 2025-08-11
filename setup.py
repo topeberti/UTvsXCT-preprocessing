@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='preprocess_tools',
-    version='0.1.21',
+    version='0.1.22',
     author='Alberto Vicente del Egido',
     author_email='alberto.vicente@imdea.org',
     description='Database utilities and preprocessing tools for UT vs XCT database',
@@ -19,7 +19,8 @@ setup(
         "tifffile",
         "PyWavelets ",
         "fill_voids",
-        "opencv-python"
+        "opencv-python",
+        "seaborn"
     ],
     classifiers=[
         'Programming Language :: Python :: 3',

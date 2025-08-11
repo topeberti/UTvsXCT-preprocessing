@@ -944,7 +944,7 @@ def apply_transform_parameters_sequential(matrix, ut, xct, ut_resolution=1, xct_
         # Convert and rearrange axes
         transformed_volume = np.array(transformed_volume)
 
-        return transformed_volume[:, :, 0]
+        return transformed_volume
 
 def apply_transform_parameters_paralel(matrix, ut, xct, ut_resolution=1, xct_resolution=0.025):
     """
@@ -1067,10 +1067,10 @@ def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_re
     Parameters
     ----------
     ut : numpy.ndarray
-        3D ultrasound volume with shape (X, Y, Z) where Z is the depth
+        3D ultrasound volume with shape (Z,Y,X) where Z is the depth
         axis and Y, X are the spatial dimensions.
     xct : numpy.ndarray
-        3D X-ray CT volume with shape (X, Y, Z) where Z is the depth
+        3D X-ray CT volume with shape (Z,Y,X) where Z is the depth
         axis and Y, X are the spatial dimensions.
     
     Returns
@@ -1165,8 +1165,8 @@ def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_re
 
     # Apply transformation to XCT centers for verification
     transformed_xct_centers = apply_transform_parameters(
-        transformation_matrix, ut, ((xct_centers > 0) * 255).astype(xct.dtype), original_resolution=reference_resolution
-    )
+        transformation_matrix, ut, ((xct_centers > 0) * 255).astype(xct.dtype), ut_resolution=reference_resolution, xct_resolution=reference_resolution
+    ) # We use the reference resolution twice because we are reshaping the resized XCT
 
     return parameters, ut_centers, xct_centers, transformed_xct_centers
 
