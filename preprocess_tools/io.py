@@ -33,20 +33,24 @@ def read_sequence(folder_path):
     
     return np.array(volume)
 
-def write_sequence(folder_path, volume):
+def write_sequence(folder_path, volume, ignore_not_empty=False):
     """
     Save a 3D volume as a sequence of TIFF files in a folder.
     
     Args:
     folder_path (str): Path to the folder where TIFF files will be saved.
-    name (str): Name of the TIFF files.
     volume (numpy.ndarray): A 3D array where each slice corresponds to an image.
+    ignore_not_empty (bool, optional): If False and .tif files exists in folder_path, raise an error. Defaults to False.
     """
-
-    folder_path = folder_path 
 
     # Create the folder if it doesn't exist
     Path(folder_path).mkdir(parents=True, exist_ok=True)
+    
+    # Check if folder contains .tif or .tiff files and ignore_not_empty is False
+    if not ignore_not_empty:
+        existing_tiff_files = [f for f in os.listdir(folder_path) if (f.endswith('.tiff') or f.endswith('.tif'))]
+        if existing_tiff_files:
+            raise ValueError(f"Folder {folder_path} already contains TIFF files. Set ignore_not_empty=True to override.")
 
     # Save each slice as a TIFF file with progress bar
     with tqdm(total=volume.shape[0], desc="Saving") as pbar:
