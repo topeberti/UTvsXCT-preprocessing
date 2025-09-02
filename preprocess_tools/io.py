@@ -42,9 +42,6 @@ def write_sequence(folder_path, volume, ignore_not_empty=False):
     volume (numpy.ndarray): A 3D array where each slice corresponds to an image.
     ignore_not_empty (bool, optional): If False and .tif files exists in folder_path, raise an error. Defaults to False.
     """
-
-    # Create the folder if it doesn't exist
-    Path(folder_path).mkdir(parents=True, exist_ok=True)
     
     # Check if folder contains .tif or .tiff files and ignore_not_empty is False
     if not ignore_not_empty:
@@ -117,19 +114,20 @@ def load_tif(path):
     
     return volume
 
-def save_tif(path, volume):
+def save_tif(path, volume, ignore_not_empty=False):
     """
     Save a 3D volume as a TIF/TIFF file or a sequence of TIF/TIFF files.
 
     Args:
     path (str): Path to the output TIFF file/folder.
     volume (numpy.ndarray): A 3D array representing the volume.
+    ignore_not_empty (bool, optional): If False and .tif files exists in folder_path, raise an error. Defaults to False.
     """
     
     # Check if the path is a directory or a file
     if os.path.isdir(path):
         # If it's a directory, save the volume as a sequence of TIFF files
-        write_sequence(path, volume)
+        write_sequence(path, volume, ignore_not_empty)
     else:
         # If it's a file, save the single TIFF file
         tifffile.imwrite(path, volume)

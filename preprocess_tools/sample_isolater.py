@@ -16,10 +16,12 @@ def isolate_samples(volume, n_samples):
     Returns:
     list: A list of sample volumes.
     """
+    print('Segmenting with Otsu')
     # Step 1: Apply Otsu's threshold to segment the volume into foreground (samples) and background
     thresh = threshold_otsu(volume)
     binary = volume > thresh
 
+    print("Filling holes")
     # Step 2: Fill holes in each 2D slice to ensure samples are solid regions
     filled = np.zeros_like(binary)
 
@@ -36,6 +38,7 @@ def isolate_samples(volume, n_samples):
     for i in range(binary.shape[0]):
         filled[i] = filled_slices[i]
 
+    print("Labeling connected regions")
     # Step 5: Label connected regions in the 3D binary volume (each sample gets a unique label)
     label_image = label(filled)
 
@@ -55,13 +58,14 @@ def isolate_samples(volume, n_samples):
         # Crop the sample to its bounding box
         sample = sample[bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5]]
         return sample
-
+    
+    print("Extracting samples")
     # Step 8: Extract the n_samples largest samples in parallel
     volumes = Parallel(n_jobs=-1)(
         delayed(process_sample)(volume, label_image, props[i].label, props[i].bbox)
         for i in range(n_samples)
     )
-
+    
     # Step 9: Collect bounding boxes for sorting
     bboxes = [props[i].bbox for i in range(n_samples)]
 
