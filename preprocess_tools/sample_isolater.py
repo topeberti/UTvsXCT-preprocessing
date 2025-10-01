@@ -89,12 +89,7 @@ def isolate_samples_ut(volume, n_samples):
 
     #get envelope of the RF signal
 
-    volume = volume.swapaxes(2,0) 
-
-    envelope = signal.envelope(volume)
-
-    envelope = envelope.swapaxes(2,0)
-    volume = volume.swapaxes(2,0)  # Swap back to (z,y,x) for processing
+    envelope = signal.envelope(volume, axis=0)
 
     #get the maximum value of the envelope
     max_image = envelope.max(axis=0)
@@ -143,8 +138,8 @@ def isolate_samples_ut(volume, n_samples):
     # Step 7: Collect bounding boxes for sorting
     bboxes = [props[i].bbox for i in range(n_samples)]
 
-    # Step 8: Order the samples by their position along the z-axis (bbox[2])
-    volumes = [v for _, v in sorted(zip(bboxes, volumes), key=lambda pair: pair[0][2])]
+    # Step 8: Order the samples by their position along the x-axis (bbox[2])
+    volumes = [v for _, v in sorted(zip(bboxes, volumes), key=lambda pair: pair[0][1])]
 
     # Step 9: Return the list of extracted UT sample volumes
     return volumes

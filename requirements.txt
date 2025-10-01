@@ -11,3 +11,6 @@ PyWavelets
 git+https://github.com/topeberti/utxct-db-tools.git
 pdoc
 seaborn
+PyWavelets
+opencv-python
+ipykernel

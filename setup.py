@@ -20,7 +20,8 @@ setup(
         "PyWavelets ",
         "fill_voids",
         "opencv-python",
-        "seaborn"
+        "seaborn",
+        "PyWavelets"
     ],
     classifiers=[
         'Programming Language :: Python :: 3',

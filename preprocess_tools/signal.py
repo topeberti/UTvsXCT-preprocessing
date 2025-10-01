@@ -17,7 +17,7 @@ from scipy.signal import hilbert
 import numpy as np
 from tqdm import tqdm
 
-def envelope(volume):
+def envelope(volume, axis=-1):
     """
     Calculates the amplitude envelope of a 3D volume using Hilbert transform.
     
@@ -52,7 +52,7 @@ def envelope(volume):
     volume = volume - volume.mean()
 
     # Apply Hilbert transform along the last dimension (signal propagation axis)
-    data_hilbert = hilbert(volume, axis=-1)
+    data_hilbert = hilbert(volume, axis=axis)
     
     # Calculate the amplitude envelope as the absolute value of the Hilbert transform
     amplitude_envelope = np.abs(data_hilbert)
