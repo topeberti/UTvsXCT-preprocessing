@@ -252,3 +252,116 @@ def get_IQ_patches(ut_patches):
     iq_patches = np.array(iq_patches)
 
     return iq_patches
+
+def attenuation(data,reference,gate1,gate2,axis=-1):
+
+    """
+    This function calculates the attenuation of a signal or a signals volume.
+    Attenuation is calculated as a logarithmic ratio of the peak amplitudes at two specified gates using the formula 20*log10(reference/A2), where A2 is the peak amplitude at gate2.
+
+    Parameters:
+    -----------
+    data (numpy.ndarray): The input signal or volume of signals. It can be a 1D array (single signal) or a multi-dimensional array (volume of signals).
+    reference (float): The reference amplitude value used in the attenuation calculation.
+    gate1 (list or tuple): A list or tuple containing the start and end indices of the first gate and the threshold (e.g., [start1, end1, threshold]).
+    gate2 (list or tuple): A list or tuple containing the start and end indices of the second gate and the threshold (e.g., [start2, end2, threshold]).
+    axis (int): The axis along which to calculate the attenuation. Default is -1 (last axis).
+
+    Returns:
+    --------
+    numpy.ndarray: The calculated attenuation values. The shape of the output array
+    depends on the input data and the specified axis.
+    """
+
+    # Ensure gate parameters are valid
+    if len(gate1) != 3 or len(gate2) != 3:
+        raise ValueError("gate1 and gate2 must be lists or tuples of length 3: [start, end, threshold]")
+    #ensure data is a numpy array
+    assert isinstance(data, np.ndarray), "data must be a numpy array"
+
+    start1, end1, threshold1 = gate1
+    start2, end2, threshold2 = gate2
+
+    # Check if data is 1D (single signal) or multi-dimensional (volume of signals)
+    if data.ndim == 1:
+        # Single signal case
+        signal = data
+
+        # Extract the segments corresponding to the gates
+        segment1 = signal[start1:end1]
+        segment2 = signal[start2:end2]
+
+        # Find the peak amplitudes within the specified gates
+        A1 = np.max(segment1[segment1 >= threshold1]) if np.any(segment1 >= threshold1) else 0
+        A2 = np.max(segment2[segment2 >= threshold2]) if np.any(segment2 >= threshold2) else 0
+
+        # Calculate attenuation using the logarithmic ratio formula
+        if A1 > 0 and A2 > 0:
+            attenuation_value = 20 * np.log10(reference / A2)
+        else:
+            attenuation_value = np.nan  # Return NaN if either amplitude is zero or negative
+
+        return attenuation_value
+
+    else:
+        # Volume of signals case
+        # Move the specified axis to the last position for easier processing
+        data = np.moveaxis(data, axis, -1)
+
+        # Initialize an array to hold the attenuation values
+        attenuation_values = np.full(data.shape[:-1], np.nan)
+
+        # Iterate over all indices except the last one (signal axis)
+        it = np.nditer(attenuation_values, flags=['multi_index'], op_flags=['writeonly'])
+        while not it.finished:
+            idx = it.multi_index
+            signal = data[idx]
+
+            # Extract the segments corresponding to the gates
+            segment1 = signal[start1:end1]
+            segment2 = signal[start2:end2]
+
+            # Find the peak amplitudes within the specified gates
+            A1 = np.max(segment1[segment1 >= threshold1]) if np.any(segment1 >= threshold1) else 0
+            A2 = np.max(segment2[segment2 >= threshold2]) if np.any(segment2 >= threshold2) else 0
+            # Calculate attenuation using the logarithmic ratio formula
+            if A1 > 0 and A2 > 0:
+                it[0] = 20 * np.log10(reference / A2)
+            else:
+                it[0] = np.nan  # Return NaN if either amplitude is zero or negative
+
+            it.iternext()
+
+        return attenuation_values
+
+def plot_gate(signal, gate, ax=None):
+    """
+    Plots a signal with a highlighted gate region.
+
+    Parameters:
+    -----------
+    signal (numpy.ndarray): The input signal to be plotted.
+    gate (list or tuple): A list or tuple containing the start and end indices of the gate (e.g., [start, end]).
+    ax (matplotlib.axes.Axes, optional): The axes on which to plot. If None, a new figure and axes are created.
+
+    Returns:
+    --------
+    matplotlib.axes.Axes: The axes with the plotted signal and highlighted gate.
+    """
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        fig, ax = plt.subplots()
+
+    ax.plot(signal, label='Signal')
+    
+    start, end, threshold = gate
+    # Highlight the gate region up to the threshold using fill_between
+    x = np.arange(start, end)
+    ax.fill_between(x, threshold, np.max(signal), color='red', alpha=0.3, label='Gate Region')
+    
+    ax.set_xlabel('Sample Index')
+    ax.set_ylabel('Amplitude')
+    ax.legend()
+    
+    return ax
