@@ -101,7 +101,7 @@ def align_volume_xyz(volume, mask, order = 3, cval = 40):
     
     return aligned_volume.astype(np.uint8)
 
-def align_volume_xy(volume,parallel=True,cval=40):
+def align_volume_xy(volume,volume_type='XCT', parallel=True,cval=40):
     """
     Aligns a 3D volume such that the XY plane is aligned with the principal axes.
     
@@ -112,7 +112,7 @@ def align_volume_xy(volume,parallel=True,cval=40):
         numpy.ndarray: Aligned volume (uint8) (z,y,x)
     """
 
-    angle_yz, angle_xz = register.YZ_XZ_inclination(volume,'XCT')
+    angle_yz, angle_xz = register.YZ_XZ_inclination(volume,volume_type)
 
     print(f"Aligning volume with angles: YZ={angle_yz} degrees, XZ={angle_xz} degrees")
 
