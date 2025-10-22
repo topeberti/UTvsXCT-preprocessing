@@ -537,7 +537,7 @@ def material_mask(xct):
     """
     # Estimate memory requirements for parallel processing
     # Factor of 2 accounts for temporary arrays, chunking overhead, and void filling
-    required_mem_bytes = xct.nbytes * 2
+    required_mem_bytes = xct.nbytes * 20000000000000000000000
     available_mem_bytes = psutil.virtual_memory().available
     
     print(f"Material mask memory analysis:")
