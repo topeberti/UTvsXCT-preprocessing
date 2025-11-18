@@ -264,7 +264,7 @@ def preprocess(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1):
     return onlypores_cropped, mask_cropped, ut_rf_cropped
 
 def patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size=3, ut_step_size=1, 
-          xct_resolution=0.025, ut_resolution=1):
+          xct_resolution=0.025, ut_resolution=1, xct_patch_reduced_size=None):
     """
     Divide cropped images into patches for analysis.
     
@@ -282,6 +282,8 @@ def patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size=3, ut_st
         ut_step_size (int, optional): UT step size in pixels. Defaults to 1.
         xct_resolution (float, optional): XCT resolution in mm/pixel. Defaults to 0.025.
         ut_resolution (float, optional): UT resolution in mm/pixel. Defaults to 1.
+        xct_patch_size (int, optional): XCT patch size in pixels. If None, computed from UT patch size. Defaults to None.
+        xct_step_size (int, optional): XCT step size in pixels. If None, computed from UT step size. Defaults to None.
         
     Returns:
         tuple: (patches_onlypores, patches_mask, patches_ut, patch_grid_shape)
@@ -295,7 +297,7 @@ def patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size=3, ut_st
         >>> patches = patch(onlypores_crop, mask_crop, ut_crop, ut_patch_size=5)
         >>> pore_patches, mask_patches, ut_patches, grid_shape = patches
     """
-    # Compute equivalent XCT patch dimensions based on resolution scaling
+
     xct_patch_size = int(np.round(calculate_pixels(ut_resolution, xct_resolution, ut_patch_size)))
     xct_step_size = int(np.round(calculate_pixels(ut_resolution, xct_resolution, ut_step_size)))
 
@@ -316,12 +318,14 @@ def patch(onlypores_cropped, mask_cropped, ut_rf_cropped, ut_patch_size=3, ut_st
     patches_ut = divide_into_patches(ut_rf_cropped, ut_patch_size, ut_step_size)
 
     patches_onlypores = divide_into_patches(onlypores_cropped, xct_patch_size, xct_step_size)
-    # Note: Commented code below was for centering patches - kept for reference
-    # center_size = int(patches_onlypores.shape[2] / ut_patch_size)
-    # patches_onlypores = patches_onlypores[:, :, center_size:-center_size, center_size:-center_size]
+
+    if xct_patch_reduced_size:
+        reduced_size = xct_patch_reduced_size
+        start = (xct_patch_size - reduced_size) // 2
+        end = start + reduced_size
+        patches_onlypores = patches_onlypores[:, :, start:end, start:end]
     
     patches_mask = divide_into_patches(mask_cropped, xct_patch_size, xct_step_size)
-    # patches_mask = patches_mask[:, :, center_size:-center_size, center_size:-center_size]
 
     # Calculate patch grid shape for reconstructing volfrac image from flat dataset
     num_patches_h = ((ut_rf_cropped.shape[1] - ut_patch_size) // ut_step_size) + 1
@@ -478,7 +482,7 @@ def create_dataset(patches_onlypores, patches_mask, patches_ut):
     return df_patch_vs_volfrac
 
 def main(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1.0, 
-         ut_patch_size=3, ut_step_size=1):
+         ut_patch_size=3, ut_step_size=1, xct_patch_reduced_size=None):
     """
     Main pipeline for creating UT vs XCT datasets.
     
@@ -518,7 +522,7 @@ def main(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1.0,
     # Step 3: Divide images into patches for analysis
     patches_onlypores, patches_mask, patches_ut, patch_grid_shape = patch(
         onlypores_cropped, mask_cropped, ut_rf_cropped, 
-        ut_patch_size, ut_step_size, xct_resolution, ut_resolution)
+        ut_patch_size, ut_step_size, xct_resolution, ut_resolution,xct_patch_reduced_size)
     
     print('Cleaning the pores...')
     # Step 4: Optional pore cleaning (currently commented out)

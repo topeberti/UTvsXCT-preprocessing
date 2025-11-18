@@ -126,7 +126,7 @@ def isolate_samples_ut(volume, n_samples):
         sample = volume.copy()
 
         # Crop the sample to its bounding box
-        sample = sample[:,bbox[0]-10:bbox[2]+10, bbox[1]-10:bbox[3]+10]
+        sample = sample[:,bbox[0]-3:bbox[2]+3, bbox[1]-3:bbox[3]+3]
         return sample
 
     # Step 6: Extract the n_samples largest samples sequentially

@@ -238,6 +238,34 @@ def otsu_thresholding(volume):
 
     return binary
 
+def slice_cleaning(img,min_size=2):
+    """
+    Clean a 2D binary image by removing small objects below a size threshold.
+    
+    This function removes connected components in a binary image that are smaller
+    than the specified minimum size. It is useful for eliminating noise and small
+    artifacts from segmented images.
+
+    Parameters:
+    ----------
+    img : numpy.ndarray
+        2D binary numpy array representing the input image.
+    min_size : int, optional (default=2)
+        Minimum size (in pixels) for connected components to be retained.
+    Returns:
+    -------
+    numpy.ndarray
+        2D binary numpy array representing the cleaned image.
+    """
+    
+    # Remove small objects below the specified size threshold
+    cleaned_img = remove_small_objects(img > 0, min_size=min_size, connectivity=1)
+    
+    # Convert back to binary: non-zero labels become True
+    cleaned_binary = cleaned_img > 0
+    
+    return cleaned_binary
+
 def onlypores(xct, frontwall=0, backwall=0, sauvola_radius=30, sauvola_k=0.125, min_size_filtering=-1):
     """
     Extract pores from a 3D X-ray CT volume using advanced thresholding and segmentation.
@@ -325,7 +353,7 @@ def onlypores(xct, frontwall=0, backwall=0, sauvola_radius=30, sauvola_k=0.125, 
     print('Applying Sauvola adaptive thresholding...')
     binary_cropped = sauvola_thresholding(cropped_volume, window_size=sauvola_radius, k=sauvola_k)
 
-    # Step 5: Handle wall exclusions for sample boundaries
+    # Step 6: Handle wall exclusions for sample boundaries
     # Set wall regions to True (material) to exclude them from pore detection
     if frontwall > 0:
         print(f'Excluding front wall: slices 0 to {frontwall-1}')
@@ -334,13 +362,13 @@ def onlypores(xct, frontwall=0, backwall=0, sauvola_radius=30, sauvola_k=0.125, 
         print(f'Excluding back wall: slices {backwall} to end')
         binary_cropped[backwall:, :, :] = True
     
-    # Step 6: Reconstruct full-size binary volume
+    # Step 7: Reconstruct full-size binary volume
     # Create binary volume matching original dimensions
     binary = np.zeros(xct.shape, dtype=bool)
     # Place processed data back into correct spatial location
     binary[min_z:max_z+1, min_y:max_y+1, min_x:max_x+1] = binary_cropped
     
-    # Step 7: Generate material mask to define sample boundaries
+    # Step 8: Generate material mask to define sample boundaries
     print('Generating material mask...')
     sample_mask_cropped = material_mask(cropped_volume)
     
@@ -348,7 +376,7 @@ def onlypores(xct, frontwall=0, backwall=0, sauvola_radius=30, sauvola_k=0.125, 
     sample_mask = np.zeros_like(binary)
     sample_mask[min_z:max_z+1, min_y:max_y+1, min_x:max_x+1] = sample_mask_cropped
     
-    # Step 8: Extract pores by combining thresholding and material mask
+    # Step 9: Extract pores by combining thresholding and material mask
     # Invert binary: True becomes False (material -> background), False becomes True (pores -> foreground)
     binary_inverted = np.invert(binary)
     # Keep only pores that are within the material sample (intersection)
@@ -356,7 +384,7 @@ def onlypores(xct, frontwall=0, backwall=0, sauvola_radius=30, sauvola_k=0.125, 
     
     print(f'Initial pore detection complete. Found {np.sum(onlypores_result)} pore voxels.')
 
-    # Step 9: Optional post-processing to remove small artifacts
+    # Step 10: Optional post-processing to remove small artifacts
     if min_size_filtering > 0:
         print(f'Applying pore filtering with minimum size: {min_size_filtering}')
         onlypores_result = clean_pores(onlypores_result, min_size=min_size_filtering)
@@ -365,89 +393,7 @@ def onlypores(xct, frontwall=0, backwall=0, sauvola_radius=30, sauvola_k=0.125, 
     print('Pore detection analysis complete.')
     return onlypores_result, sample_mask, binary
 
-def material_mask_parallel(xct):
-    """
-    Generate a material mask for a 3D volume using parallel processing.
-    
-    This function creates a binary mask that defines the boundaries of the material sample
-    within the CT volume. It uses Otsu thresholding followed by morphological operations
-    and void filling to create a solid material boundary. Processing is parallelized
-    across volume chunks for improved performance.
-
-    Parameters:
-    ----------
-    xct : numpy.ndarray
-        3D numpy array representing the input CT volume.
-
-    Returns:
-    -------
-    numpy.ndarray
-        3D binary numpy array representing the material mask where True indicates
-        material regions and False indicates background/air.
-        
-    Notes:
-    -----
-    - Uses chunked parallel processing for memory efficiency
-    - Combines Otsu thresholding with maximum projection analysis
-    - Applies void filling to create solid material boundaries
-    - Number of chunks (16) can be adjusted based on system resources
-    """
-
-    def process_chunk(xct_chunk):
-        """
-        Process a single chunk of the volume to generate material mask.
-        
-        This inner function applies the material mask algorithm to a subset
-        of the volume data for parallel processing.
-        """
-        # Apply global Otsu thresholding to separate material from background
-        threshold_value = filters.threshold_otsu(xct_chunk)
-        binary = xct_chunk > threshold_value
-        
-        # Create maximum intensity projection along Z-axis to find sample outline
-        max_proj = np.max(binary, axis=0)
-        
-        # Label connected components in the projection
-        labels = measure.label(max_proj)
-        props = regionprops(labels)
-        
-        # Use the largest connected component (assumed to be the main sample)
-        if len(props) > 0:
-            # Get bounding box of the primary component
-            minr, minc, maxr, maxc = props[0].bbox
-            # Crop the binary volume to the sample region
-            binary_cropped = binary[:, minr:maxr, minc:maxc]
-            # Fill internal voids to create solid material mask
-            sample_mask_cropped = fill_voids.fill(binary_cropped, in_place=False)
-            # Reconstruct full-size mask
-            sample_mask = np.zeros_like(binary)
-            sample_mask[:, minr:maxr, minc:maxc] = sample_mask_cropped
-        else:
-            # Fallback if no components found
-            sample_mask = binary
-            
-        return sample_mask
-
-    print('Computing material mask using parallel processing...')
-
-    # Divide volume into chunks for parallel processing
-    # Adjust num_chunks based on available cores and memory
-    num_chunks = 16  
-    chunks = np.array_split(xct, num_chunks)
-
-    # Process chunks in parallel using joblib
-    print(f'Processing {num_chunks} chunks in parallel...')
-    sample_masks = Parallel(n_jobs=-1, backend='loky')(
-        delayed(process_chunk)(chunk) for chunk in chunks
-    )
-
-    # Combine results from all chunks
-    sample_mask = np.concatenate(sample_masks, axis=0)
-    print('Material mask generation complete.')
-
-    return sample_mask
-
-def material_mask_nonconcurrent(xct):
+def material_mask(xct):
     """
     Generate a material mask for a 3D volume using sequential processing.
     
@@ -508,50 +454,6 @@ def material_mask_nonconcurrent(xct):
     
     print('Material mask generation complete.')
     return sample_mask
-
-def material_mask(xct):
-    """
-    Generate a material mask for a 3D volume with automatic implementation selection.
-    
-    This is the main entry point for material mask generation. It automatically chooses
-    between parallel and sequential implementations based on available system memory
-    to optimize performance while preventing memory overflow.
-
-    Parameters:
-    ----------
-    xct : numpy.ndarray
-        3D numpy array representing the input CT volume.
-
-    Returns:
-    -------
-    numpy.ndarray
-        3D binary numpy array representing the material mask where True indicates
-        material regions and False indicates background/air.
-        
-    Notes:
-    -----
-    - Automatically selects optimal implementation based on memory
-    - Memory estimation considers ~2x input size for processing overhead
-    - Falls back to sequential processing if memory is insufficient
-    - Provides memory usage feedback for optimization
-    """
-    # Estimate memory requirements for parallel processing
-    # Factor of 2 accounts for temporary arrays, chunking overhead, and void filling
-    required_mem_bytes = xct.nbytes * 2
-    available_mem_bytes = psutil.virtual_memory().available
-    
-    print(f"Material mask memory analysis:")
-    print(f"  Volume size: {xct.nbytes / 1024**3:.2f} GB")
-    print(f"  Available memory: {available_mem_bytes / 1024**3:.2f} GB")
-    print(f"  Required estimate: {required_mem_bytes / 1024**3:.2f} GB")
-    
-    # Choose implementation based on memory availability
-    if available_mem_bytes > required_mem_bytes:
-        print("  Using parallel implementation...")
-        return material_mask_parallel(xct)
-    else:
-        print("  Using sequential implementation (memory conservation)...")
-        return material_mask_nonconcurrent(xct)
     
 def clean_pores(onlypores, min_size=8):
     """
