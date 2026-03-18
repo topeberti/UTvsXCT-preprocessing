@@ -7,6 +7,7 @@
 	"settings": {
 		"python-envs.defaultEnvManager": "ms-python.python:conda",
 		"python-envs.defaultPackageManager": "ms-python.python:conda",
+		"peacock.color": "#f00220",
 		"workbench.colorCustomizations": {
 			"activityBar.activeBackground": "#fd2843",
 			"activityBar.background": "#fd2843",
@@ -25,7 +26,6 @@
 			"titleBar.activeForeground": "#e7e7e7",
 			"titleBar.inactiveBackground": "#f0022099",
 			"titleBar.inactiveForeground": "#e7e7e799"
-		},
-		"peacock.color": "#f00220"
+		}
 	}
 }

@@ -14,6 +14,7 @@ Functions:
     get_IQ_patches(ut_patches): Converts a batch of UT patches to their I/Q components
 """
 from scipy.signal import hilbert
+from scipy import fft
 import numpy as np
 from tqdm import tqdm
 
@@ -365,3 +366,38 @@ def plot_gate(signal, gate, ax=None):
     ax.legend()
     
     return ax
+
+def fft(x,sf=66.3,positive_only=True):
+    """
+    Computes the Fast Fourier Transform (FFT) of a signal and returns the frequency bins and their corresponding magnitudes.
+
+    Parameters:
+    -----------
+    x (numpy.ndarray): The input signal for which to compute the FFT.
+    sf (float): The sampling frequency of the signal in MHz. Default is 66.3 MHz.
+    positive_only (bool): If True, returns only the positive frequency components. Default is True.
+
+    Returns:
+    --------
+    f (numpy.ndarray): The frequency bins corresponding to the FFT output.
+    X_magnitude (numpy.ndarray): The magnitude of the FFT of the input signal.
+    """
+    # Number of samples in the signal
+    N = len(x)
+    
+    # Compute the FFT of the signal
+    X = np.fft.fft(x)
+    
+    # Compute the magnitude of the FFT
+    X_magnitude = np.abs(X)  # Already normalized by 'forward' norm
+    
+    # Compute the frequency bins
+    f = np.fft.fftfreq(N, d=1/sf)  # Frequency bins in MHz
+    
+    if positive_only:
+        # Keep only the positive frequencies
+        half_N = N // 2
+        f = f[:half_N]
+        X_magnitude = X_magnitude[:half_N]
+    
+    return f, X_magnitude

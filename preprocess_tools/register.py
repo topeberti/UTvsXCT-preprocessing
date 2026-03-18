@@ -1114,10 +1114,11 @@ def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_re
     xct = np.swapaxes(xct, 0, 1)
     xct = np.swapaxes(xct, 1, 2)
 
+    #Setp 1: Hole center detection in both modalities
+
     # Extract and label pore centers from both volumes
     ut_centers = label_objects(ut_preprocessing(ut))
     xct_centers = label_objects(xct_preprocessing(xct,original_resolution = registered_resolution, new_resolution = reference_resolution))
-
 
     # Extract point coordinates and intensity values from labeled images
     ut_points = extract_points(ut_centers)
@@ -1150,6 +1151,8 @@ def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_re
 
     print('Registering')
 
+    #Step 2: Registration computation
+
     # Compute transformation from XCT to UT coordinate system
     transformation_matrix = rigid_body_transformation_matrix(
         sorted_xct_points[:, :2], sorted_ut_points[:, :2]
@@ -1162,6 +1165,8 @@ def register_ut_xct_monoelement(ut, xct, reference_resolution = 1, registered_re
 
     # Store the scaled transformation as the final parameters
     parameters = scaled_transformation_matrix
+
+    # Step 3: Verification by transforming XCT centers
 
     # Apply transformation to XCT centers for verification
     transformed_xct_centers = apply_transform_parameters(
