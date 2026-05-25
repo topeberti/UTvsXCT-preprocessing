@@ -12,11 +12,95 @@ Functions:
     convert_to_IQ(signal): Converts a real-valued signal to its I/Q components
     get_IQ_patch(ut_patch): Converts a single UT patch to its I/Q components
     get_IQ_patches(ut_patches): Converts a batch of UT patches to their I/Q components
+    gate_max_amplitudes(volume, gates): Gets max amplitude per signal for each gate
 """
 from scipy.signal import hilbert
 from scipy import fft
 import numpy as np
 from tqdm import tqdm
+
+
+def gate_max_amplitudes(volume, gates, axis=0, flatten=True):
+    """
+    Compute maximum amplitude per signal for each gate in a UT volume.
+
+    Parameters:
+    ----------
+    volume (numpy.ndarray):
+        Input volume containing UT signals. The signal axis is defined by ``axis``.
+
+    gates (list):
+        A single gate or list of gates. Each gate can be:
+        - [start, end]
+        - [start, end, threshold]
+        where ``start`` and ``end`` are sample indices on the signal axis.
+
+    axis (int, optional):
+        Axis of ``volume`` that corresponds to the signal samples. Default is 0.
+
+    flatten (bool, optional):
+        If True, returns one flat list of maxima per gate (one value per signal).
+        If False, preserves the original non-signal dimensions as arrays.
+
+    Returns:
+    -------
+        numpy.ndarray or list[numpy.ndarray]:
+                If multiple gates are provided, returns a list of NumPy arrays,
+                one array per gate.
+                If a single gate is provided, returns only that gate result as
+                a NumPy array.
+                - If ``flatten=True``: gate result shape is ``(n_signals_total,)``.
+                - If ``flatten=False``: gate result shape is ``volume.shape``
+                    without the signal axis.
+                For thresholded gates, signals with max amplitude below threshold
+                are filtered out from the returned values.
+    """
+    if not isinstance(volume, np.ndarray):
+        raise TypeError("volume must be a numpy array")
+
+    if not isinstance(gates, (list, tuple, np.ndarray)) or len(gates) == 0:
+        raise ValueError("gates must be a non-empty gate or list of gates")
+
+    # Normalize input so downstream logic always iterates over a list of gates.
+    is_single_gate = (
+        len(gates) in (2, 3)
+        and not isinstance(gates[0], (list, tuple, np.ndarray))
+    )
+    gates_to_process = [gates] if is_single_gate else gates
+
+    data = np.moveaxis(volume, axis, -1)
+    signal_len = data.shape[-1]
+    signal_data = np.abs(data)
+
+    max_per_gate = []
+    for gate in gates_to_process:
+        if len(gate) not in (2, 3):
+            raise ValueError("Each gate must be [start, end] or [start, end, threshold]")
+
+        start = int(gate[0])
+        end = int(gate[1])
+
+        if start < 0 or end > signal_len or start >= end:
+            raise ValueError(
+                f"Invalid gate [{start}, {end}] for signal length {signal_len}"
+            )
+
+        segment = signal_data[..., start:end]
+        segment_max = np.max(segment, axis=-1)
+
+        if len(gate) == 3:
+            threshold = gate[2]
+            gate_values = segment_max.reshape(-1)
+            gate_result = gate_values[gate_values >= threshold]
+        else:
+            gate_result = segment_max.reshape(-1) if flatten else segment_max
+
+        max_per_gate.append(gate_result)
+
+    if is_single_gate:
+        return max_per_gate[0]
+
+    return max_per_gate
 
 def envelope(volume, axis=-1):
     """
@@ -401,3 +485,4 @@ def fft(x,sf=66.3,positive_only=True):
         X_magnitude = X_magnitude[:half_N]
     
     return f, X_magnitude
+
