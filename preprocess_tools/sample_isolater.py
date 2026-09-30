@@ -1,7 +1,6 @@
 import numpy as np
 from skimage.filters import threshold_otsu
 from scipy.ndimage import binary_fill_holes
-from joblib import Parallel, delayed
 from skimage.measure import label, regionprops
 from . import signal
 
@@ -17,27 +16,21 @@ def isolate_samples(volume, n_samples):
     list: A list of sample volumes.
     """
     # Step 1: Apply Otsu's threshold to segment the volume into foreground (samples) and background
-    thresh = threshold_otsu(volume)
+    # Subsample + cast to float32 to avoid bincount MemoryError on large-range integer dtypes
+    step = max(1, volume.size // 2_000_000)
+    thresh = threshold_otsu(volume.ravel()[::step].astype(np.float32))
     binary = volume > thresh
 
     # Step 2: Fill holes in each 2D slice to ensure samples are solid regions
     filled = np.zeros_like(binary)
-
-    def process_slice(i):
-        # Fill holes in a single 2D slice
-        return binary_fill_holes(binary[i])
-
-    # Step 3: Use parallel processing to fill holes in all slices for efficiency
-    filled_slices = Parallel(n_jobs=-1)(
-        delayed(process_slice)(i) for i in range(binary.shape[0])
-    )
-
-    # Step 4: Combine the processed slices back into a 3D volume
     for i in range(binary.shape[0]):
-        filled[i] = filled_slices[i]
+        filled[i] = binary_fill_holes(binary[i])
+    del binary
 
     # Step 5: Label connected regions in the 3D binary volume (each sample gets a unique label)
-    label_image = label(filled)
+    # int32 uses 4× less memory than default int64; sufficient for <2B components
+    label_image = label(filled).astype(np.int32)
+    del filled
 
     # Step 6: Extract properties (such as area and bounding box) of each labeled region
     props = regionprops(label_image)
@@ -47,20 +40,18 @@ def isolate_samples(volume, n_samples):
 
     minimum_value = volume[volume.shape[0] // 2, volume.shape[1] // 2].min()
 
-    def process_sample(volume, label_image, label, bbox):
-        # Extract a single sample from the original volume using its label and bounding box
-        sample = volume.copy()
-        # Set all voxels outside the current label to the minimum value of the middle of the volume (background)
-        sample[label_image != label] = minimum_value
-        # Crop the sample to its bounding box
-        sample = sample[bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5]]
-        return sample
+    def process_sample(vol, lbl_img, lbl_id, bbox):
+        # Crop bounding box first, then mask — avoids copying the full volume per sample
+        cropped = vol[bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5]].copy()
+        cropped[lbl_img[bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5]] != lbl_id] = minimum_value
+        return cropped
 
-    # Step 8: Extract the n_samples largest samples in parallel
-    volumes = Parallel(n_jobs=-1)(
-        delayed(process_sample)(volume, label_image, props[i].label, props[i].bbox)
+    # Step 8: Extract the n_samples largest samples sequentially to bound peak memory
+    volumes = [
+        process_sample(volume, label_image, props[i].label, props[i].bbox)
         for i in range(n_samples)
-    )
+    ]
+    del label_image
 
     # Step 9: Collect bounding boxes for sorting
     bboxes = [props[i].bbox for i in range(n_samples)]
