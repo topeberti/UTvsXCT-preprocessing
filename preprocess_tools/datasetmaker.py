@@ -901,6 +901,103 @@ def calculate_fraction_maps(onlypores_cropped, mask_cropped, xct_pixels_per_ut_p
     return volfrac_maps, areafrac_image, depth_rois
 
 
+def calculate_volume_vvf(onlypores, mask, xct_resolution=0.025,
+                         material_threshold=0.8, metadata=False):
+    """
+    Compute per-pixel front/middle/back VVF maps and whole-volume VVF for a
+    standalone XCT pore/mask pair (no registered UT pair required).
+
+    Unlike `calculate_fraction_maps` as used elsewhere in the pipeline, this
+    does not bin pixels into UT-sized blocks: onlypores/mask are kept at
+    their native XCT x-y resolution, with no cropping or reduction. This is
+    done by calling `calculate_fraction_maps` with a block size of 1 pixel,
+    which reduces to the identity (every XCT pixel is its own output pixel)
+    while still reusing its depth-region/material-threshold logic exactly.
+    Whole-volume and per-region scalar VVF (voxel sums, no material
+    threshold) are computed on the same (untouched) volumes.
+
+    Args:
+        onlypores (np.ndarray): 3D XCT pore image (z, x, y), boolean/binary.
+        mask (np.ndarray): 3D XCT material mask (z, x, y), boolean/binary.
+        xct_resolution (float, optional): XCT pixel resolution in mm, recorded in
+            `vvf_row` metadata only (not used in the computation). Defaults to 0.025.
+        material_threshold (float, optional): Minimum material content for a valid
+            map pixel, passed to `calculate_fraction_maps`. Defaults to 0.8.
+        metadata (bool, optional): If True, `vvf_row` also includes shape/ROI/voxel
+            bookkeeping fields. Defaults to False (only the vvf_* scalars).
+
+    Returns:
+        tuple: (volfrac_maps, areafrac_image, vvf_row)
+            - volfrac_maps: shape (3, x, y) float32 at native XCT resolution,
+              ordered front/middle/back
+            - areafrac_image: shape (x, y) float32 at native XCT resolution
+            - vvf_row: dict with 'vvf_total', 'vvf_front', 'vvf_middle', 'vvf_back'
+              (nan where the corresponding region/volume has no material), plus
+              extended bookkeeping fields when metadata=True
+
+    Raises:
+        ValueError: If `onlypores` and `mask` shapes differ.
+
+    Example:
+        >>> volfrac_maps, areafrac_image, vvf_row = calculate_volume_vvf(pores, mask)
+        >>> vvf_row['vvf_total']
+    """
+    if onlypores.shape != mask.shape:
+        raise ValueError(
+            f"Shape mismatch: onlypores {onlypores.shape} vs mask {mask.shape}"
+        )
+
+    volfrac_maps, areafrac_image, depth_rois = calculate_fraction_maps(
+        onlypores, mask, xct_pixels_per_ut_pixel=1,
+        material_threshold=material_threshold)
+
+    total_pore_voxels = int(np.sum(onlypores))
+    total_material_voxels = int(np.sum(mask))
+    vvf_total = (
+        total_pore_voxels / total_material_voxels
+        if total_material_voxels > 0 else float('nan')
+    )
+
+    vvf_row = {'vvf_total': vvf_total}
+
+    region_voxels = {}
+    for roi in depth_rois:
+        region = roi['region']
+        start_z, end_z = roi['start_z'], roi['end_z']
+        pore_voxels = int(np.sum(onlypores[start_z:end_z]))
+        material_voxels = int(np.sum(mask[start_z:end_z]))
+        vvf_row[f'vvf_{region}'] = (
+            pore_voxels / material_voxels if material_voxels > 0 else float('nan')
+        )
+        region_voxels[region] = (pore_voxels, material_voxels)
+
+    if metadata:
+        vvf_row['volume_shape'] = tuple(onlypores.shape)
+        vvf_row['volfrac_maps_shape'] = tuple(volfrac_maps.shape)
+        vvf_row['target_map_shape'] = tuple(volfrac_maps.shape[1:])
+        vvf_row['volfrac_region_names'] = tuple(roi['region'] for roi in depth_rois)
+        vvf_row['depth_roi_start_z'] = tuple(roi['start_z'] for roi in depth_rois)
+        vvf_row['depth_roi_end_exclusive_z'] = tuple(roi['end_exclusive_z'] for roi in depth_rois)
+        vvf_row['depth_roi_end_inclusive_z'] = tuple(roi['end_inclusive_z'] for roi in depth_rois)
+        vvf_row['depth_roi_start_from_frontwall'] = tuple(
+            roi['start_from_frontwall'] for roi in depth_rois)
+        vvf_row['depth_roi_end_exclusive_from_frontwall'] = tuple(
+            roi['end_exclusive_from_frontwall'] for roi in depth_rois)
+        vvf_row['depth_roi_end_inclusive_from_frontwall'] = tuple(
+            roi['end_inclusive_from_frontwall'] for roi in depth_rois)
+        vvf_row['material_frontwall_z'] = depth_rois[0]['material_frontwall_z']
+        vvf_row['material_backwall_z'] = depth_rois[0]['material_backwall_z']
+        vvf_row['pore_voxels_total'] = total_pore_voxels
+        vvf_row['material_voxels_total'] = total_material_voxels
+        for region, (pore_voxels, material_voxels) in region_voxels.items():
+            vvf_row[f'pore_voxels_{region}'] = pore_voxels
+            vvf_row[f'material_voxels_{region}'] = material_voxels
+        vvf_row['material_threshold'] = material_threshold
+        vvf_row['xct_resolution'] = xct_resolution
+
+    return volfrac_maps, areafrac_image, vvf_row
+
+
 def create_image_maps(onlypores_cropped, mask_cropped, ut_rf_cropped,
                       xct_resolution=0.025, ut_resolution=1.0,
                       material_threshold=0.8,

@@ -5,6 +5,7 @@ joblib
 tqdm
 tifffile
 pandas
+pyarrow
 matplotlib
 fill_voids
 PyWavelets
