@@ -45,6 +45,47 @@ def UT_surface_coordinates(volume_UT):
 
     return np.array(surface_coords)
 
+def PAUT_surface_coordinates(volume_PAUT, min_depth = 0, max_depth = None):
+    """
+    Extracts the surface coordinates from an Ultrasound (UT) volume.
+
+    For each (x, y) column in the volume, it takes the A-scan (signal along z),
+    finds the maximum value, and keeps it only if it exceeds a threshold.
+    Returns the coordinates (z, y, x) of the surface points.
+
+    Parameters:
+        volume_UT (numpy.ndarray): 3D UT volume (z, y, x)
+
+    Returns:
+        numpy.ndarray: Array of surface points (z, y, x)
+    """
+
+    if max_depth is None:
+        max_depth = volume_PAUT.shape[0]
+
+    threshold = 60  # Minimum amplitude to consider as surface
+    y_max = volume_PAUT.shape[1]
+    x_max = volume_PAUT.shape[2]
+
+    surface_coords = []  # List to store (z, y, x) surface coordinates
+
+    # Loop over each x-y location in the volume
+    for x in range(x_max):
+        for y in range(y_max):
+            A_scan = volume_PAUT[:, y, x]  # Signal along z-axis
+            max_val = np.max(A_scan)     # Maximum value in the signal
+
+            # If the max value is above the threshold, store the index
+            if max_val > threshold:
+                if min_depth <= z <= max_depth:
+                    z = np.argmax(A_scan)    # Position of the max value
+                    surface_coords.append((z, y, x))
+
+    if not surface_coords:
+        raise ValueError("No surface points found above the threshold.")
+
+    return np.array(surface_coords)
+
 def XCT_surface_coordinates(volume_XCT):
     """
     Extracts the surface coordinates from a X-ray CT (XCT) volume.
@@ -85,7 +126,7 @@ def XCT_surface_coordinates(volume_XCT):
     return np.array(surface_coords)
 
 
-def YZ_XZ_inclination(volume, volumeType='XCT'):
+def YZ_XZ_inclination(volume, volumeType='XCT', min_depth = 0, max_depth = None):
     """
     Calculates the inclination of the surface in a 3D volume with respect to
     the YZ and XZ planes by fitting a plane to the extracted surface points.
@@ -97,6 +138,8 @@ def YZ_XZ_inclination(volume, volumeType='XCT'):
     Parameters:
         volume (numpy.ndarray): 3D image volume (z, y, x)
         volumeType (str): 'XCT' for CT scan, 'UT' for ultrasound
+        min_depth (int): Minimum depth to consider for surface extraction
+        max_depth (int): Maximum depth to consider for surface extraction
 
     Returns:
         tuple: (angle_yz, angle_xz) in degrees
@@ -105,6 +148,8 @@ def YZ_XZ_inclination(volume, volumeType='XCT'):
     # Choose appropriate method based on volume type
     if volumeType == 'UT':
         surface_coords = UT_surface_coordinates(volume)
+    elif volumeType == 'PAUT':
+        surface_coords = PAUT_surface_coordinates(volume, min_depth=min_depth, max_depth=max_depth)
     elif volumeType == 'XCT':
         surface_coords = XCT_surface_coordinates(volume)
     else:

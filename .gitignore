@@ -1,2 +1,7 @@
 .env
 Miniconda3-latest-Linux-x86_64.sh
+/notebooks/jorge/outputs/
+__pycache__/
+# Large image volumes
+*.tif
+*.tiff
