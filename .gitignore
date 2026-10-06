@@ -1,6 +1,6 @@
 .env
 /notebooks/jorge/outputs/
-/__pycache__/
+__pycache__/
 # Large image volumes
 *.tif
 *.tiff
