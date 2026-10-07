@@ -1,0 +1,59 @@
+{
+  "_notes": [
+    "Per-acquisition 'params' override preprocess_tools.paut.DEFAULT_PARAMS, e.g.",
+    "default: echo start on the Hilbert envelope (method maximum) and depth crop [-4, 6.5] mm around the entrance echo; {\"echo_start\": {\"signal\": \"abs\", \"method\": \"first\"}, \"depth_range_mm\": [0, 6]} reproduces the colleague's files;",
+    "{\"echo_start\": {\"threshold_pct\": 30, \"gate_mm\": [-5, 5], \"interpolate_missing\": true}}"
+  ],
+  "export_root": "~/Dev/Data/UTs/ut-ideko/exports",
+  "output_root": "/mnt/BertiNJorge/01_CompoSTLar/06_Inspection_Results/01_UTPA",
+  "output_unc_root": "\\\\192.168.10.106\\imdea\\01_CompoSTLar\\06_Inspection_Results\\01_UTPA",
+  "reference_root": "~/Dev/Data/UTs/cropped_data",
+  "exclude_dirs": [
+    "_old"
+  ],
+  "acquisitions": {
+    "_raw_3p5MHz_16elem": {
+      "folder": "raw_3p5MHz_16elem",
+      "params": {},
+      "db_measurementtype": {
+        "name": "Phased Array Ultrasound Pulse Echo 16 elem 3.5 MHz",
+        "elements": 16
+      }
+    },
+    "_echostar_3p5MHz_16elem": {
+      "folder": "echostar_3p5MHz_16elem",
+      "params": {
+        "echo_start": {
+          "enabled": false
+        }
+      },
+      "note": "echo start applied by the equipment during acquisition; not preprocessed or reviewed for now (01_Raw only)",
+      "review": false,
+      "db_measurementtype": {
+        "name": "Phased Array Ultrasound Pulse Echo 16 elem 3.5 MHz echostar (echo start by the equipment)",
+        "elements": 16,
+        "extra": {
+          "echo_start": "applied by the equipment during acquisition"
+        }
+      }
+    }
+  },
+  "default_acquisition_params": {},
+  "campaigns": {
+    "Na_Panels": {
+      "sample_regex": "^Na_(\\d{2})_0*(\\d+)$",
+      "sample_format": "Na_{0}_{1}"
+    },
+    "Pegaso": {
+      "sample_regex": "^(\\d+)_(\\d+)$",
+      "sample_format": "{0}.{1}"
+    },
+    "JI": {},
+    "Paneles A": {},
+    "F_01": {}
+  },
+  "campaign_by_prefix": {
+    "Na_": "Na_Panels"
+  },
+  "db_env": "~/Dev/db/.env"
+}
