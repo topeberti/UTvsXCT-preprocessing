@@ -1190,3 +1190,278 @@ def main_images(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1.0,
     )
 
     return ut_rf_grid, volfrac_maps, areafrac_image, depth_rois
+
+
+# ---------------------------------------------------------------------------
+# Pore-level targets (material voxels, full-depth VVF, per-pore features)
+# ---------------------------------------------------------------------------
+
+PORE_FEATURE_COLUMNS = ('volume_mm3', 'eq_diameter_mm', 'area_mm2', 'sphericity',
+                        'cenital_angle_deg', 'flatness', 'elongation')
+
+
+def pore_shape(obj, voxel_mm=0.025):
+    """
+    Shape features of ONE pore.
+
+    Args:
+        obj (np.ndarray): (dz, dy, dx) bool crop containing a single pore
+        voxel_mm (float, optional): Isotropic voxel size in mm. Defaults to 0.025.
+
+    Returns:
+        dict: volume_vox, volume_mm3, area_mm2 (marching-cubes surface),
+            eq_diameter_mm, sphericity (clipped to 1), cenital_angle_deg (angle between
+            the main inertia axis and z, folded to [0, 90]), flatness = sqrt(l3/l1) and
+            elongation = sqrt(l2/l1) with l1 >= l2 >= l3 the covariance eigenvalues.
+            PCA features are NaN for single-voxel pores.
+    """
+    n = int(obj.sum())
+    vol = n * voxel_mm ** 3
+    padded = np.pad(obj, 1).astype(np.float32)
+    verts, faces, _, _ = measure.marching_cubes(padded, level=0.5, spacing=(voxel_mm,) * 3)
+    area = measure.mesh_surface_area(verts, faces)
+    out = {'volume_vox': n, 'volume_mm3': vol, 'area_mm2': area,
+           'eq_diameter_mm': (6 * vol / np.pi) ** (1 / 3),
+           'sphericity': min(np.pi ** (1 / 3) * (6 * vol) ** (2 / 3) / area, 1.0),
+           'cenital_angle_deg': np.nan, 'flatness': np.nan, 'elongation': np.nan}
+    if n < 2:
+        return out
+    coords = np.argwhere(obj).astype(np.float64) * voxel_mm
+    w, v = np.linalg.eigh(np.cov(coords.T))
+    if w[2] <= 0:
+        return out
+    out['cenital_angle_deg'] = np.degrees(np.arccos(np.clip(abs(v[0, 2]), 0, 1)))
+    out['flatness'] = np.sqrt(max(w[0], 0) / w[2])
+    out['elongation'] = np.sqrt(max(w[1], 0) / w[2])
+    return out
+
+
+def compute_pore_features(pores_blk, voxel_mm=0.025, min_voxels=8, min_axis=2):
+    """
+    Per-pore features of a block (3D connected components, 26-connectivity).
+
+    A pore is removed if it has fewer than `min_voxels` voxels or a bounding-box
+    extent smaller than `min_axis` voxels along any axis.
+
+    Args:
+        pores_blk (np.ndarray): (z, x, y) bool pore block
+        voxel_mm (float, optional): Voxel size in mm. Defaults to 0.025.
+        min_voxels (int, optional): Minimum voxel count. Defaults to 8.
+        min_axis (int, optional): Minimum bounding-box extent per axis. Defaults to 2.
+
+    Returns:
+        tuple: (DataFrame with one row per kept pore, n_removed_pores, n_removed_voxels).
+            Columns: pore_id, touches_xy_border, touches_z_border, centroid_z/x/y_vox
+            (block-local voxel coordinates) and the `pore_shape` features.
+    """
+    lab, n = scipy.ndimage.label(pores_blk, structure=scipy.ndimage.generate_binary_structure(3, 3))
+    Zb, Xb, Yb = pores_blk.shape
+    counts = np.bincount(lab.ravel(), minlength=n + 1)
+    rows, n_rm, vox_rm = [], 0, 0
+    for k, sl in enumerate(scipy.ndimage.find_objects(lab), start=1):
+        if sl is None:
+            continue
+        if counts[k] < min_voxels or min(s.stop - s.start for s in sl) < min_axis:
+            n_rm += 1
+            vox_rm += int(counts[k])
+            continue
+        obj = lab[sl] == k
+        centroid = np.argwhere(obj).mean(axis=0) + np.array([s.start for s in sl])
+        row = {'pore_id': k,
+               'touches_xy_border': sl[1].start == 0 or sl[1].stop == Xb or sl[2].start == 0 or sl[2].stop == Yb,
+               'touches_z_border': sl[0].start == 0 or sl[0].stop == Zb,
+               'centroid_z_vox': centroid[0], 'centroid_x_vox': centroid[1], 'centroid_y_vox': centroid[2]}
+        row.update(pore_shape(obj, voxel_mm))
+        rows.append(row)
+    return pd.DataFrame(rows), n_rm, vox_rm
+
+
+def calculate_material_voxels_map(mask_grid, xct_pixels_per_ut_pixel):
+    """
+    Material voxel count per UT pixel (full depth, no threshold masking).
+
+    Args:
+        mask_grid (np.ndarray): XCT material mask aligned to the UT grid (z, x, y)
+        xct_pixels_per_ut_pixel (int): XCT pixels per UT pixel in x-y
+
+    Returns:
+        np.ndarray: (ut_x, ut_y) uint32 map
+    """
+    b = xct_pixels_per_ut_pixel
+    z, x, y = mask_grid.shape
+    return mask_grid.reshape(z, x // b, b, y // b, b).sum(axis=(0, 2, 4)).astype(np.uint32)
+
+
+def calculate_thickness_map(mask_grid, xct_pixels_per_ut_pixel, xct_resolution=0.025):
+    """
+    Material thickness per UT pixel in mm (full depth, no threshold masking).
+
+    Mean over the XCT columns inside each UT pixel of the number of material voxels
+    along z, times the voxel size. Pixels without material are 0.
+
+    Args:
+        mask_grid (np.ndarray): XCT material mask aligned to the UT grid (z, x, y)
+        xct_pixels_per_ut_pixel (int): XCT pixels per UT pixel in x-y
+        xct_resolution (float, optional): Voxel size in mm. Defaults to 0.025.
+
+    Returns:
+        np.ndarray: (ut_x, ut_y) float32 map in mm
+    """
+    b = xct_pixels_per_ut_pixel
+    voxels = calculate_material_voxels_map(mask_grid, b).astype(np.float64)
+    return (voxels / (b * b) * xct_resolution).astype(np.float32)
+
+
+def calculate_full_vvf_map(onlypores_grid, mask_grid, xct_pixels_per_ut_pixel, material_threshold=0.8):
+    """
+    Full-depth void volume fraction per UT pixel (-1 where invalid).
+
+    Invalid = no material or material below `material_threshold` times the maximum
+    material count, the same rule used by `calculate_depth_volfrac_maps`.
+
+    Returns:
+        np.ndarray: (ut_x, ut_y) float32 map
+    """
+    b = xct_pixels_per_ut_pixel
+    z, x, y = mask_grid.shape
+    pore_sum = onlypores_grid.reshape(z, x // b, b, y // b, b).sum(axis=(0, 2, 4))
+    mask_sum = mask_grid.reshape(z, x // b, b, y // b, b).sum(axis=(0, 2, 4))
+    vvf = np.full(mask_sum.shape, -1, dtype=np.float32)
+    valid = mask_sum > 0
+    vvf[valid] = pore_sum[valid] / mask_sum[valid]
+    if material_threshold is not None and mask_sum.max() > 0:
+        vvf[mask_sum / mask_sum.max() < material_threshold] = -1
+    return vvf
+
+
+def calculate_pore_patch_targets(onlypores_grid, mask_grid, xct_pixels_per_ut_pixel, patch_ut,
+                                 xct_resolution=0.025, frontwall_z=0, material_threshold=0.8,
+                                 min_voxels=8, min_axis=2):
+    """
+    Pore count and per-pore features on non-overlapping patches of `patch_ut` x `patch_ut` UT pixels.
+
+    The patch grid is anchored at UT pixel (0, 0); trailing UT pixels that do not
+    fill a whole patch get no pore targets. A patch is valid if its material voxel
+    count is at least `material_threshold` times the maximum over patches. Pores are
+    only computed for valid patches. Pores cut by a patch border appear in each patch.
+
+    Args:
+        onlypores_grid, mask_grid (np.ndarray): XCT pores / mask aligned to the UT grid (z, x, y)
+        xct_pixels_per_ut_pixel (int): XCT pixels per UT pixel
+        patch_ut (int): Patch side in UT pixels
+        xct_resolution (float, optional): Voxel size in mm. Defaults to 0.025.
+        frontwall_z (int, optional): Material frontwall slice, origin of the pore depth.
+        material_threshold (float, optional): Patch validity threshold. Defaults to 0.8.
+        min_voxels, min_axis (int, optional): Pore filter, see `compute_pore_features`.
+
+    Returns:
+        tuple: (pores_df, pore_patches_df, pore_count_map)
+            - pores_df: one row per kept pore with patch indices, the patch UT range,
+              the UT pixel (ut_x, ut_y) containing the pore centroid, the centroid depth
+              from the frontwall in mm and the shape features.
+            - pore_patches_df: one row per patch with material voxels, validity,
+              pore_count and filtered pore/voxel counts.
+            - pore_count_map: (patch_x, patch_y) float32, -1 for invalid patches.
+    """
+    px = xct_pixels_per_ut_pixel
+    P = patch_ut * px
+    _, X, Y = mask_grid.shape
+    npx, npy = X // P, Y // P
+    if npx == 0 or npy == 0:
+        raise ValueError(f"Patch of {patch_ut} UT pixels does not fit in the UT grid {(X // px, Y // px)}")
+
+    mat = np.zeros((npx, npy), dtype=np.int64)
+    for i in range(npx):
+        for j in range(npy):
+            mat[i, j] = mask_grid[:, i * P:(i + 1) * P, j * P:(j + 1) * P].sum()
+    mat_fraction = mat / mat.max() if mat.max() > 0 else np.zeros(mat.shape)
+    valid = mat_fraction >= material_threshold
+
+    pore_parts, patch_rows = [], []
+    pore_count_map = np.full((npx, npy), -1, dtype=np.float32)
+    for i in range(npx):
+        for j in range(npy):
+            row = {'patch_i': i, 'patch_j': j,
+                   'ut_x0': i * patch_ut, 'ut_x1': (i + 1) * patch_ut,
+                   'ut_y0': j * patch_ut, 'ut_y1': (j + 1) * patch_ut,
+                   'material_voxels': int(mat[i, j]), 'material_fraction': float(mat_fraction[i, j]),
+                   'valid': bool(valid[i, j]), 'pore_count': np.nan,
+                   'removed_pores': np.nan, 'removed_voxels': np.nan}
+            if valid[i, j]:
+                blk = onlypores_grid[:, i * P:(i + 1) * P, j * P:(j + 1) * P]
+                feats, n_rm, vox_rm = compute_pore_features(blk, xct_resolution, min_voxels, min_axis)
+                kept_vox = int(feats.volume_vox.sum()) if len(feats) else 0
+                assert kept_vox + vox_rm == int(blk.sum()), 'kept + removed pore voxels != patch pore voxels'
+                row.update(pore_count=len(feats), removed_pores=n_rm, removed_voxels=vox_rm)
+                pore_count_map[i, j] = len(feats)
+                if len(feats):
+                    ut_x = i * patch_ut + np.floor(feats.centroid_x_vox / px).astype(int)
+                    ut_y = j * patch_ut + np.floor(feats.centroid_y_vox / px).astype(int)
+                    feats.insert(0, 'patch_j', j)
+                    feats.insert(0, 'patch_i', i)
+                    feats.insert(3, 'ut_x0', i * patch_ut)
+                    feats.insert(4, 'ut_x1', (i + 1) * patch_ut)
+                    feats.insert(5, 'ut_y0', j * patch_ut)
+                    feats.insert(6, 'ut_y1', (j + 1) * patch_ut)
+                    feats.insert(7, 'ut_x', ut_x.to_numpy())
+                    feats.insert(8, 'ut_y', ut_y.to_numpy())
+                    feats['centroid_z_mm_from_frontwall'] = (feats.centroid_z_vox - frontwall_z) * xct_resolution
+                    pore_parts.append(feats)
+            patch_rows.append(row)
+
+    pores_df = pd.concat(pore_parts, ignore_index=True) if pore_parts else pd.DataFrame()
+    return pores_df, pd.DataFrame(patch_rows), pore_count_map
+
+
+def main_images_pores(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1.0,
+                      material_threshold=0.8, pore_patch_ut=5,
+                      min_pore_voxels=8, min_pore_axis_voxels=2):
+    """
+    Image-shaped UT vs XCT pipeline with pore-level targets (block reduction only).
+
+    Same preprocessing and maps as `main_images`, plus:
+    - per-UT-pixel material voxel count, thickness (mm) and full-depth VVF maps;
+    - pore count and per-pore features on `pore_patch_ut` x `pore_patch_ut` UT-pixel patches.
+
+    Args:
+        onlypores, mask, ut_rf (np.ndarray): XCT pores, XCT material mask, UT volume (z, x, y)
+        xct_resolution, ut_resolution (float): Resolutions in mm
+        material_threshold (float, optional): Valid-pixel/patch material threshold. Defaults to 0.8.
+        pore_patch_ut (int, optional): Pore patch side in UT pixels. Defaults to 5.
+        min_pore_voxels, min_pore_axis_voxels (int, optional): Pore filter.
+
+    Returns:
+        dict: ut_image (z, x, y); volfrac_maps (3, x, y); areafrac_image (x, y);
+            depth_rois; vvf_full_map (x, y); material_voxels_map (x, y);
+            thickness_map (x, y, mm);
+            pores_df; pore_patches_df; pore_count_map (x//patch, y//patch)
+    """
+    xct_pixels = calculate_pixels(ut_resolution, xct_resolution, 1)
+    px = int(np.round(xct_pixels))
+    if px <= 0 or not np.isclose(xct_pixels, px):
+        raise ValueError(f"UT/XCT resolution ratio must be an integer. Got {xct_pixels}.")
+
+    onlypores_cropped, mask_cropped, ut_rf_cropped = preprocess(
+        onlypores, mask, ut_rf, xct_resolution, ut_resolution)
+    onlypores_grid, mask_grid, ut_image = align_to_ut_grid(
+        onlypores_cropped, mask_cropped, ut_rf_cropped, px)
+
+    volfrac_maps, areafrac_image, depth_rois = calculate_fraction_maps(
+        onlypores_grid, mask_grid, px, material_threshold=material_threshold)
+    material_voxels_map = calculate_material_voxels_map(mask_grid, px)
+    thickness_map = calculate_thickness_map(mask_grid, px, xct_resolution)
+    vvf_full_map = calculate_full_vvf_map(onlypores_grid, mask_grid, px, material_threshold)
+
+    pores_df, pore_patches_df, pore_count_map = calculate_pore_patch_targets(
+        onlypores_grid, mask_grid, px, pore_patch_ut,
+        xct_resolution=xct_resolution,
+        frontwall_z=depth_rois[0]['material_frontwall_z'],
+        material_threshold=material_threshold,
+        min_voxels=min_pore_voxels, min_axis=min_pore_axis_voxels)
+
+    return {
+        'ut_image': ut_image, 'volfrac_maps': volfrac_maps, 'areafrac_image': areafrac_image,
+        'depth_rois': depth_rois, 'vvf_full_map': vvf_full_map,
+        'material_voxels_map': material_voxels_map, 'thickness_map': thickness_map, 'pores_df': pores_df,
+        'pore_patches_df': pore_patches_df, 'pore_count_map': pore_count_map,
+    }
