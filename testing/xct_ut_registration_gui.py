@@ -345,12 +345,56 @@ def ct_material_mask(ct_img):
     return out
 
 
-def us_footprint_mask(us_norm, min_depth=0):
-    """Otsu on the max-amplitude C-scan (below ``min_depth``), largest component, holes filled,
-    extruded through depth. Returns (3D mask image, 2D footprint)."""
+def us_cscan_for_mask(us_norm, min_depth=0, cfg=None):
+    """C-scan the UT mask is thresholded on: max (or mean) amplitude over the mask depth window
+    (``cfg.ut_mask_depth_mm``, absolute depths; ``to`` = 0 means the end), never above ``min_depth``."""
     arr = sitk.GetArrayViewFromImage(us_norm)
-    cscan = arr[min(min_depth, arr.shape[0] - 1):].max(axis=0)
-    fp = ndimage.binary_fill_holes(_largest_component(cscan > threshold_otsu(cscan)))
+    nz, dz, oz = arr.shape[0], us_norm.GetSpacing()[2], us_norm.GetOrigin()[2]
+    a, b = min_depth, nz
+    if cfg is not None:
+        lo, hi = cfg.ut_mask_depth_mm
+        if lo > 0:
+            a = max(a, int(round((lo - oz) / dz)))
+        if hi > 0:
+            b = min(b, int(round((hi - oz) / dz)) + 1)
+    a = min(max(a, 0), nz - 1)
+    b = max(b, a + 1)
+    sub = arr[a:b]
+    stat = getattr(cfg, 'ut_mask_stat', 'max')
+    return (sub.mean(axis=0) if stat == 'mean' else sub.max(axis=0)), (a, b)
+
+
+def us_footprint_2d(cscan, cfg=None):
+    """Threshold (Otsu × scale, or a percentile) → opening → largest component → holes filled → erosion.
+    With ``cfg.ut_mask_full`` every A-scan is material."""
+    if cfg is not None and cfg.ut_mask_full:
+        return np.ones(cscan.shape, bool), float('nan')
+    if cfg is not None and cfg.ut_mask_percentile > 0:
+        thr = float(np.percentile(cscan, cfg.ut_mask_percentile))
+    else:
+        thr = threshold_otsu(cscan) * (cfg.ut_mask_threshold_scale if cfg is not None else 1.0)
+    fp = cscan > thr
+    r_open = cfg.ut_mask_open_px if cfg is not None else 0
+    if r_open > 0:
+        fp = ndimage.binary_opening(fp, iterations=int(r_open))
+    if cfg is None or cfg.ut_mask_largest:
+        fp = _largest_component(fp)
+    fp = ndimage.binary_fill_holes(fp)
+    er = cfg.ut_mask_erode_px if cfg is not None else 0
+    if er > 0:
+        fp = ndimage.binary_erosion(fp, iterations=int(er))
+    elif er < 0:
+        fp = ndimage.binary_dilation(fp, iterations=int(-er))
+    return fp, thr
+
+
+def us_footprint_mask(us_norm, min_depth=0, cfg=None):
+    """UT footprint from a C-scan (see :func:`us_cscan_for_mask` and :func:`us_footprint_2d`; by default
+    Otsu on the max-amplitude C-scan below ``min_depth``, largest component, holes filled), extruded
+    through depth. Returns (3D mask image, 2D footprint)."""
+    arr = sitk.GetArrayViewFromImage(us_norm)
+    cscan, _ = us_cscan_for_mask(us_norm, min_depth, cfg)
+    fp, _ = us_footprint_2d(cscan, cfg)
     m3 = np.repeat(fp[np.newaxis].astype(np.uint8), arr.shape[0], axis=0)
     out = sitk.GetImageFromArray(m3)
     out.CopyInformation(us_norm)
@@ -434,7 +478,22 @@ class PipelineConfig:
     stage2_inplane_mm: float = 0.25  # XCT in-plane spacing for Stage 2 (0 = UT spacing). Keep it finer than
     #                                 the UT pixel: equal grids give MI minima at whole-pixel shifts.
     tz_from_surfaces: bool = True
+    # UT mask (footprint of the part in the UT, extruded through depth; restricts the metric)
+    ut_mask_full: bool = False            # the whole UT volume is material (no thresholding)
+    ut_mask_depth_mm: list = field(default_factory=lambda: [0.0, 0.0])  # C-scan depth window (abs. mm; 0 = gate / end)
+    ut_mask_stat: str = 'max'             # 'max' or 'mean' amplitude over that window
+    ut_mask_threshold_scale: float = 1.0  # threshold = Otsu × this (lower = larger mask)
+    ut_mask_percentile: float = 0.0       # > 0: threshold at this percentile of the C-scan instead of Otsu
+    ut_mask_open_px: int = 0              # binary opening (removes thin bridges / specks), in UT pixels
+    ut_mask_largest: bool = True          # keep only the largest connected component
+    ut_mask_erode_px: int = 0             # shrink (> 0) or grow (< 0) the final mask, in UT pixels
+    ut_front_wall_mm: float | None = None  # known UT front-wall depth (e.g. echo-start aligned PAUT); None = detect
+    init_params: list | None = None   # start from this Euler3D [rx, ry, rz, tx, ty, tz] (UT -> XCT, mm) instead of
+    init_center_mm: list | None = None  # the moments initializer and the 90° search; tz still from the surfaces
     search_rot90: bool = True       # Stage 0: try XCT rotated by 0/90/180/270° in-plane, keep the best footprint fit
+    rz_center_deg: float = 0.0      # expected in-plane rotation (UT -> XCT view)
+    rz_range_deg: float = 0.0       # allowed |rz - centre| (deg, 0 = any): the 90° search only tries rotations
+    #                                 inside it and a stage ending outside it is rejected
     moving_mask: bool = True        # also restrict the metric with the XCT mask (overlap then varies with the transform)
     seed: int = 78
     threads: int = 0                # ITK threads; 0 = all cores. Multithreaded sums are not bit-reproducible
@@ -529,6 +588,11 @@ def configure_metric(reg, metric, bins, sampling, jh_variance, ants_radius, seed
         reg.SetMetricSamplingStrategy(reg.NONE)
 
 
+def rz_offset_deg(rz_rad, center_deg):
+    """Signed in-plane rotation of ``rz_rad`` from ``center_deg``, wrapped to (-180, 180]."""
+    return -((center_deg - np.rad2deg(rz_rad) + 180.0) % 360.0 - 180.0)
+
+
 class RegistrationPipeline:
     """Stage 0 (init) → Stage 1 (coarse) → Stage 2 (fine) → Stage 3 (local grid).
 
@@ -588,7 +652,7 @@ class RegistrationPipeline:
             self.warn(f"UT gate {cfg.us_gate_mm} mm = {self.gate} samples is more than half of the "
                       f"{nz} samples ({nz * dz:.2f} mm); using no gate")
             self.gate = 0
-        self.us_mask, self.us_fp = us_footprint_mask(self.us_fine, self.gate)
+        self.us_mask, self.us_fp = us_footprint_mask(self.us_fine, self.gate, cfg)
         us_coarse = normalize(us_coarse_raw, None, cfg.us_clip, cfg.us_sigma_vox, cfg.us_log)
         us_mask_coarse = resample_mask(self.us_mask, us_coarse)
         self.ct_fine_norm = normalize(self.ct_fine_raw, self.ct_mask, cfg.ct_clip)
@@ -624,12 +688,17 @@ class RegistrationPipeline:
         """Deterministic score of ``tx`` on the fine images (same metric for every stage)."""
         reg = self._eval_reg()
         reg.SetInitialTransform(sitk.Euler3DTransform(tx), inPlace=True)
-        cost = reg.MetricEvaluate(self.us_fine, self.ct_fine_norm)
+        try:
+            cost = reg.MetricEvaluate(self.us_fine, self.ct_fine_norm)
+        except RuntimeError:   # nothing overlaps: scored as inf below instead of stopping the run
+            cost = np.inf
         warped = sitk.GetArrayViewFromImage(
             resample(self.ct_mask, self.us_fine, tx, sitk.sitkNearestNeighbor)) > 0
         overlap = int(np.logical_and(warped, sitk.GetArrayViewFromImage(self.us_mask) > 0).sum())
-        if overlap == 0:
+        if overlap == 0 or not np.isfinite(cost):
             cost = np.inf  # SimpleITK returns DBL_MAX when nothing overlaps
+            self.warn(f"{name}: the UT and the transformed XCT do not overlap — check the orientation on the Load "
+                      f"tab, the given initial transform and the allowed rz range")
         res = StageResult(name, sitk.Euler3DTransform(tx), float(cost), overlap,
                           dice(warped.any(axis=0), self.us_fp), **kw)
         p = res.params()
@@ -640,16 +709,26 @@ class RegistrationPipeline:
 
     def _initial_transform(self):
         us_c, ct_c, usm_c, ctm_c = self.coarse
-        try:
-            tx = sitk.CenteredTransformInitializer(
-                usm_c, ctm_c, sitk.Euler3DTransform(), sitk.CenteredTransformInitializerFilter.MOMENTS)
-            how = 'MOMENTS on masks'
-        except Exception:
-            tx = sitk.CenteredTransformInitializer(
-                us_c, ct_c, sitk.Euler3DTransform(), sitk.CenteredTransformInitializerFilter.GEOMETRY)
-            how = 'GEOMETRY'
+        if self.cfg.init_params is not None:
+            tx = sitk.Euler3DTransform()
+            tx.SetCenter([float(c) for c in (self.cfg.init_center_mm or (0.0, 0.0, 0.0))])
+            tx.SetParameters([float(v) for v in self.cfg.init_params])
+            how = 'given initial transform'
+        else:
+            try:
+                tx = sitk.CenteredTransformInitializer(
+                    usm_c, ctm_c, sitk.Euler3DTransform(), sitk.CenteredTransformInitializerFilter.MOMENTS)
+                how = 'MOMENTS on masks'
+            except Exception:
+                tx = sitk.CenteredTransformInitializer(
+                    us_c, ct_c, sitk.Euler3DTransform(), sitk.CenteredTransformInitializerFilter.GEOMETRY)
+                how = 'GEOMETRY'
         tx = sitk.Euler3DTransform(tx)
-        k_us, z_us = ut_front_wall(self.us_fine, self.us_fp, self.gate)
+        if cfg_fw := self.cfg.ut_front_wall_mm:
+            z_us = float(cfg_fw)
+            k_us = (z_us - self.us_fine.GetOrigin()[2]) / self.us_fine.GetSpacing()[2]
+        else:
+            k_us, z_us = ut_front_wall(self.us_fine, self.us_fp, self.gate)
         k_ct, z_ct = ct_top_surface(self.ct_mask)
         t = list(tx.GetTranslation())
         self.z_info = {'ut_front_wall_index': k_us, 'ut_front_wall_mm': z_us,
@@ -664,6 +743,11 @@ class RegistrationPipeline:
                 self.warn("surface and moments tz disagree by more than half the UT depth — check the "
                           "UT gate and that Z points into the part from the probe side for both")
         tx.SetTranslation(t)
+        if self.cfg.init_params is not None:
+            return tx
+        if self.cfg.rz_range_deg > 0 and not self.cfg.search_rot90:
+            tx.SetRotation(0.0, 0.0, np.deg2rad(self.cfg.rz_center_deg))
+            self.log(f"  rz starts at the expected {self.cfg.rz_center_deg:+.1f}°")
         return self._search_rot90(tx) if self.cfg.search_rot90 else tx
 
     def _footprint_dice_2d(self, tx):
@@ -697,8 +781,14 @@ class RegistrationPipeline:
             rots.append(t)
         dices = [self._footprint_dice_2d(t) for t in rots]
         costs = [self._cost(t) for t in rots]
-        best_d = max(dices)
-        k_best = min((k for k in range(4) if dices[k] >= best_d - 0.03), key=lambda k: costs[k])
+        allowed = list(range(4))
+        c, r = self.cfg.rz_center_deg, self.cfg.rz_range_deg
+        if r > 0:
+            allowed = [k for k in range(4) if abs(rz_offset_deg(k * np.pi / 2, c)) <= r] or \
+                      [min(range(4), key=lambda k: abs(rz_offset_deg(k * np.pi / 2, c)))]
+            self.log(f"  rz limited to {c:+.1f}° ± {r:.1f}°: trying {', '.join(f'{90 * k}°' for k in allowed)}")
+        best_d = max(dices[k] for k in allowed)
+        k_best = min((k for k in allowed if dices[k] >= best_d - 0.03), key=lambda k: costs[k])
         self.log("  90° search:  " + "   ".join(f"{90 * k}°: Dice {dices[k]:.3f}, cost {costs[k]:.4f}"
                                                  for k in range(4)) + f"   → {90 * k_best}°")
         # mirror check: flip the XCT in X about its image centre and move the moments centroid accordingly
@@ -854,7 +944,12 @@ class RegistrationPipeline:
             nonlocal best
             stages.append(res)
             d = res.cost - best.cost
-            if d < 0:
+            off = rz_offset_deg(res.transform.GetParameters()[2], cfg.rz_center_deg)
+            if cfg.rz_range_deg > 0 and abs(off) > cfg.rz_range_deg:
+                res.accepted = False
+                res.note = (f"rejected: rz {off:+.2f}° from the expected {cfg.rz_center_deg:+.1f}° is outside "
+                            f"± {cfg.rz_range_deg:.1f}°")
+            elif d < 0:
                 res.note = f"accepted (Δcost {d:+.6f} vs {best.name})"
                 best = res
             else:
@@ -1553,10 +1648,32 @@ class ConfigForm(QtWidgets.QWidget):
         self.us_sigma = _dspin(0.5, 0, 50, 2, 0.25)
         self.us_log = QtWidgets.QCheckBox("log compression")
         self.gate = _dspin(0.5, 0, 1000, 3, 0.1)
+        self.front_wall = _dspin(0.0, 0, 1000, 3, 0.1)
+        self.front_wall.setToolTip("Known depth of the UT front-wall echo (e.g. an echo-start aligned PAUT volume); "
+                                   "0 = detect it after the gate")
+        self.m_full = QtWidgets.QCheckBox("whole UT volume is material (no mask)")
+        self.m_lo, self.m_hi = _dspin(0, 0, 1000, 3, 0.25), _dspin(0, 0, 1000, 3, 0.25)
+        self.m_stat = QtWidgets.QComboBox()
+        self.m_stat.addItems(['max', 'mean'])
+        self.m_scale = _dspin(1.0, 0.01, 10, 3, 0.05)
+        self.m_pct = _dspin(0, 0, 100, 2, 1)
+        self.m_open = _ispin(0, 0, 100)
+        self.m_largest = QtWidgets.QCheckBox("keep the largest component only")
+        self.m_erode = _ispin(0, -100, 100)
+        self.m_preview = QtWidgets.QPushButton("Preview UT mask…")
+        for w in (self.m_lo, self.m_hi, self.m_stat, self.m_scale, self.m_pct, self.m_open, self.m_largest, self.m_erode):
+            self.m_full.toggled.connect(lambda on, w=w: w.setEnabled(not on))
+        self.use_init = QtWidgets.QCheckBox("start from the given transform (skips moments and the 90° search)")
+        self.init_lbl = QtWidgets.QLabel()
+        self._init = (None, None)
         self.s1_sp = _dspin(0.8, 0.001, 100, 3, 0.1)
         self.s2_inplane = _dspin(0.25, 0.0, 100, 3, 0.05)
         self.tz = QtWidgets.QCheckBox("initialise tz from UT front wall vs XCT top surface")
         self.rot90 = QtWidgets.QCheckBox("try XCT rotated 0/90/180/270° in-plane and keep the best fit")
+        self.rz_c = _dspin(0.0, -180, 180, 2, 1.0)
+        self.rz_r = _dspin(0.0, 0, 180, 2, 1.0)
+        self.rz_r.setToolTip("0 = any rotation. Otherwise the 90° search only tries rotations within centre ± range, "
+                             "rz starts at the centre when the search is off, and a stage ending outside is rejected")
         self.mmask = QtWidgets.QCheckBox("use XCT mask in the metric too (overlap varies with the transform)")
         self.seed = _ispin(78, 0, 2**31 - 1)
         self.threads = _ispin(0, 0, 1024)
@@ -1573,13 +1690,28 @@ class ConfigForm(QtWidgets.QWidget):
         f.addRow("UT smoothing σ (voxels)", self.us_sigma)
         f.addRow("", self.us_log)
         f.addRow("UT gate: skip first … mm (front wall, mask)", self.gate)
+        f.addRow("UT front wall at (mm, 0 = detect)", self.front_wall)
+        f.addRow("", self.use_init)
+        f.addRow("", self.init_lbl)
         f.addRow("Stage 1 isotropic spacing (mm)", self.s1_sp)
         f.addRow("Stage 2 XCT in-plane spacing (mm, 0 = UT)", self.s2_inplane)
         f.addRow("", self.tz)
         f.addRow("", self.rot90)
+        f.addRow("allowed rz: centre / ± range (deg, 0 = any)", self._pair(self.rz_c, self.rz_r))
         f.addRow("", self.mmask)
         f.addRow("random seed", self.seed)
         f.addRow("ITK threads (0 = all, 1 = reproducible)", self.threads)
+        mk = QtWidgets.QGroupBox("UT mask (part footprint in the UT; restricts the metric)")
+        fm = QtWidgets.QFormLayout(mk)
+        fm.addRow("", self.m_full)
+        fm.addRow("C-scan depth from / to (mm, 0 = gate / end)", self._pair(self.m_lo, self.m_hi))
+        fm.addRow("C-scan amplitude", self.m_stat)
+        fm.addRow("threshold = Otsu ×", self.m_scale)
+        fm.addRow("or percentile (> 0 replaces Otsu)", self.m_pct)
+        fm.addRow("opening (px)", self.m_open)
+        fm.addRow("", self.m_largest)
+        fm.addRow("erode (+) / dilate (−) (px)", self.m_erode)
+        fm.addRow("", self.m_preview)
         self.s1 = StageForm("Stage 1 — coarse", cfg.stage1)
         self.s2 = StageForm("Stage 2 — fine (UT native grid); also the evaluation metric", cfg.stage2)
         s3 = QtWidgets.QGroupBox("Stage 3 — local exhaustive grid around the best result")
@@ -1594,9 +1726,10 @@ class ConfigForm(QtWidgets.QWidget):
 
         lay = QtWidgets.QGridLayout(self)
         lay.addWidget(pre, 0, 0)
-        lay.addWidget(s3, 1, 0)
-        lay.addWidget(self.s1, 0, 1, 2, 1)
-        lay.addWidget(self.s2, 0, 2, 2, 1)
+        lay.addWidget(mk, 1, 0)
+        lay.addWidget(s3, 2, 0)
+        lay.addWidget(self.s1, 0, 1, 3, 1)
+        lay.addWidget(self.s2, 0, 2, 3, 1)
         self.set(cfg)
 
     @staticmethod
@@ -1619,10 +1752,30 @@ class ConfigForm(QtWidgets.QWidget):
         self.us_sigma.setValue(c.us_sigma_vox)
         self.us_log.setChecked(c.us_log)
         self.gate.setValue(c.us_gate_mm)
+        self.front_wall.setValue(c.ut_front_wall_mm or 0.0)
+        self.m_full.setChecked(c.ut_mask_full)
+        self.m_lo.setValue(c.ut_mask_depth_mm[0]), self.m_hi.setValue(c.ut_mask_depth_mm[1])
+        self.m_stat.setCurrentText(c.ut_mask_stat)
+        self.m_scale.setValue(c.ut_mask_threshold_scale)
+        self.m_pct.setValue(c.ut_mask_percentile)
+        self.m_open.setValue(c.ut_mask_open_px)
+        self.m_largest.setChecked(c.ut_mask_largest)
+        self.m_erode.setValue(c.ut_mask_erode_px)
+        self._init = (c.init_params, c.init_center_mm)
+        self.use_init.setEnabled(c.init_params is not None)
+        self.use_init.setChecked(c.init_params is not None)
+        if c.init_params is None:
+            self.init_lbl.setText("initial transform: none given")
+        else:
+            p = c.init_params
+            self.init_lbl.setText(f"initial transform: rz {np.rad2deg(p[2]):+.3f}°, tx {p[3]:+.3f}, ty {p[4]:+.3f} mm "
+                                  f"(tz from the surfaces)")
         self.s1_sp.setValue(c.stage1_spacing_mm)
         self.s2_inplane.setValue(c.stage2_inplane_mm)
         self.tz.setChecked(c.tz_from_surfaces)
         self.rot90.setChecked(c.search_rot90)
+        self.rz_c.setValue(c.rz_center_deg)
+        self.rz_r.setValue(c.rz_range_deg)
         self.mmask.setChecked(c.moving_mask)
         self.seed.setValue(c.seed)
         self.threads.setValue(c.threads)
@@ -1640,7 +1793,15 @@ class ConfigForm(QtWidgets.QWidget):
             ct_clip=[self.ct_lo.value(), self.ct_hi.value()], us_clip=[self.us_lo.value(), self.us_hi.value()],
             us_sigma_vox=self.us_sigma.value(), us_log=self.us_log.isChecked(),
             us_gate_mm=self.gate.value(), stage1_spacing_mm=self.s1_sp.value(),
+            ut_front_wall_mm=self.front_wall.value() or None,
+            ut_mask_full=self.m_full.isChecked(), ut_mask_depth_mm=[self.m_lo.value(), self.m_hi.value()], ut_mask_stat=self.m_stat.currentText(),
+            ut_mask_threshold_scale=self.m_scale.value(), ut_mask_percentile=self.m_pct.value(),
+            ut_mask_open_px=self.m_open.value(), ut_mask_largest=self.m_largest.isChecked(),
+            ut_mask_erode_px=self.m_erode.value(),
+            init_params=self._init[0] if self.use_init.isChecked() else None,
+            init_center_mm=self._init[1] if self.use_init.isChecked() else None,
             stage2_inplane_mm=self.s2_inplane.value(), tz_from_surfaces=self.tz.isChecked(), search_rot90=self.rot90.isChecked(),
+            rz_center_deg=self.rz_c.value(), rz_range_deg=self.rz_r.value(),
             moving_mask=self.mmask.isChecked(),
             seed=self.seed.value(), threads=self.threads.value(), stage1=self.s1.get(), stage2=self.s2.get(),
             stage3=Stage3Config(self.s3_en.isChecked(), self.s3_rmm.value(), self.s3_smm.value(),
@@ -1736,6 +1897,7 @@ class RegistrationTab(QtWidgets.QWidget):
         self.cancel_btn.clicked.connect(self.cancel)
         defaults.clicked.connect(lambda: self.form.set(PipelineConfig()))
         save_cfg.clicked.connect(self._save_cfg)
+        self.form.m_preview.clicked.connect(self.preview_mask)
         load_cfg.clicked.connect(self._load_cfg)
         self.cost_log = []
         self._dirty = False
@@ -1745,6 +1907,56 @@ class RegistrationTab(QtWidgets.QWidget):
 
     def set_view(self, which, v):
         self.views[which] = v
+
+    def preview_mask(self):
+        """The UT mask with the current settings, on the C-scan it is computed from (same normalisation as
+        the pipeline, on the UT native grid)."""
+        v = self.views['UT']
+        if v is None:
+            QtWidgets.QMessageBox.warning(self, "Missing input", "Load the UT volume first.")
+            return
+        try:
+            cfg = self.form.get()
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Invalid parameter", str(e))
+            return
+        QtWidgets.QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            us = normalize(sitk.Cast(to_sitk(v.to_numpy(), v.spacing), sitk.sitkFloat32), None,
+                           cfg.us_clip, cfg.us_sigma_vox, cfg.us_log)
+            nz, dz = us.GetSize()[2], us.GetSpacing()[2]
+            gate = int(round(cfg.us_gate_mm / dz))
+            gate = 0 if gate > nz // 2 else gate
+            cscan, (a, b) = us_cscan_for_mask(us, gate, cfg)
+            fp, thr = us_footprint_2d(cscan, cfg)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("UT mask preview")
+        dlg.resize(1300, 560)
+        canvas = MplCanvas(dlg, figsize=(13, 5))
+        QtWidgets.QVBoxLayout(dlg).addWidget(canvas)
+        _, dy, dx = v.spacing
+        ext = (0, cscan.shape[1] * dx, cscan.shape[0] * dy, 0)
+        a1, a2, a3 = canvas.fig.subplots(1, 3, width_ratios=[1, 1, 0.8])
+        a1.imshow(cscan, cmap='viridis', extent=ext, interpolation='nearest')
+        a1.contour(fp.astype(float), [0.5], colors='r', linewidths=1,
+                   extent=(0, cscan.shape[1] * dx, 0, cscan.shape[0] * dy), origin='upper')
+        a1.set_title(f"{cfg.ut_mask_stat} C-scan, depth {a * dz:.2f}–{b * dz:.2f} mm; mask in red", fontsize=9)
+        a2.imshow(fp, cmap='gray', extent=ext, interpolation='nearest')
+        a2.set_title(f"mask: {int(fp.sum())} of {fp.size} A-scans", fontsize=9)
+        a3.hist(cscan.ravel(), bins=100, color='0.5')
+        if np.isfinite(thr):
+            a3.axvline(thr, color='r', label=f"threshold {thr:.3f}")
+        a3.set_title("C-scan histogram", fontsize=9)
+        if np.isfinite(thr):
+            a3.legend(fontsize=8)
+        for ax in (a1, a2):
+            ax.set_xlabel("X (mm)")
+            ax.set_ylabel("Y (mm)")
+        canvas.fig.tight_layout()
+        canvas.draw()
+        dlg.show()
 
     def _save_cfg(self):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save config", "registration_config.json", "JSON (*.json)")

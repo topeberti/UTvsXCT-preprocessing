@@ -152,14 +152,22 @@ def build_plan(cfg, items, db):
             p, e, f = rec['params'], rec.get('echo_start', {}), rec.get('footprint') or {}
             es_txt = ('echo start not applied' if 'skipped' in e else
                       f"echo start ({p['echo_start']['method']} sample with "
-                      + {'abs': '|RF|', 'envelope': 'Hilbert envelope'}.get(
+                      + {'abs': '|RF|', 'envelope': 'Hilbert envelope',
+                         'envelope_ma': f"Hilbert envelope averaged over {p['echo_start'].get('average_samples')} samples"}.get(
                           p['echo_start'].get('signal', 'abs'),
                           f"|RF| peak-held over {p['echo_start'].get('hold_samples')} and averaged over "
                           f"{p['echo_start'].get('average_samples')} samples")
                       + f" x {p['echo_start']['gain']:g} >= "
                       f"{p['echo_start']['threshold_pct']:g} % in "
                       f"{p['echo_start']['gate_mm']} mm; {e['hit_count']} hits, {e['interpolated_count']} interpolated by "
-                      f"k-NN IDW; RF shifted so the entrance echo is at 0 mm)")
+                      f"k-NN IDW; "
+                      + (f"shifts made consistent between neighbouring A-scans (median clean-up of "
+                         f"{e['refine']['outliers_cleaned']} outliers, cross-correlation with the local mean waveform for "
+                         f"{e['refine']['refined_by_correlation']} A-scans, sub-sample); "
+                         if (e.get('refine') or {}).get('enabled') else '')
+                      + "RF shifted so the entrance echo is at 0 mm, fractional shifts "
+                      + ('band-limited (Fourier phase shift)' if p['echo_start'].get('resample') == 'bandlimited'
+                         else 'by linear interpolation') + ")")
             fp_txt = (f"auto detect piece ({f['threshold_pct']:g} % in {f['gate_mm']} mm, margin {f['margin_mm']:g} mm)"
                       if f else 'no auto detect piece')
             trans = (f"preprocess_tools.paut (processing_version {rec['processing_version']}, code {rec['code_version']}): "

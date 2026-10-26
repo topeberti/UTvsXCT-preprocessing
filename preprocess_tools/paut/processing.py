@@ -36,10 +36,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import uniform_filter1d
+from scipy.ndimage import gaussian_filter, median_filter, uniform_filter, uniform_filter1d
 from scipy.spatial import cKDTree
 
-PROCESSING_VERSION = 3
+PROCESSING_VERSION = 5
 
 
 @dataclass
@@ -279,25 +279,56 @@ def apply_echo_start_shifts(
     return flat_target.reshape(block.shape)
 
 
+def apply_shifts_bandlimited(values, shifts, apply_mask):
+    """Like :func:`apply_echo_start_shifts` (traces moved left by ``shifts`` samples, samples past the
+    end set to 0, A-scans outside ``apply_mask`` untouched), but fractional shifts are done in the
+    Fourier domain (phase ramp) instead of by linear interpolation: the amplitude spectrum of the
+    A-scan is unchanged, so the signal is only moved, not smoothed. Whole-sample shifts are copied
+    exactly. The trace is padded with zeros to twice its length first, so nothing wraps around."""
+    block = np.asarray(values, dtype=np.float32)
+    shift_map = np.asarray(shifts, dtype=np.float64)
+    out = apply_echo_start_shifts(block, np.where(apply_mask, np.round(shift_map), shift_map), apply_mask)
+    n = block.shape[2]
+    sh = np.clip(shift_map, 0.0, float(n - 1))
+    frac_rows = np.asarray(apply_mask, bool) & np.isfinite(shift_map) & (np.abs(sh - np.round(sh)) > 1e-9)
+    if not frac_rows.any():
+        return out
+    src, s = block[frac_rows], sh[frac_rows]
+    N = 2 * n
+    k = np.fft.rfftfreq(N)                                              # cycles per sample
+    for c in range(0, len(s), 4096):                                    # chunks keep memory small
+        spec = np.fft.rfft(src[c:c + 4096], n=N, axis=-1)
+        spec *= np.exp(2j * np.pi * k[None, :] * s[c:c + 4096, None])   # x(t + s)
+        y = np.fft.irfft(spec, n=N, axis=-1)[:, :n].astype(np.float32)
+        keep = np.arange(n)[None, :] < (n - s[c:c + 4096, None])         # past the end of the recording -> 0
+        src[c:c + 4096] = np.where(keep, y, 0.0)
+    out[frac_rows] = src
+    return out
+
+
 def detection_signal(data, signal='abs_peakhold_ma', hold_samples=5, average_samples=3):
     """Signal on which the entrance echo is detected (the shift is still applied to the RF).
 
     'envelope': Hilbert envelope |hilbert(RF)| along depth (per-A-scan mean removed first).
+    'envelope_ma': that envelope -> centred moving average over ``average_samples``.
     'abs': |RF|.  'abs_peakhold_ma': |RF| -> peak hold (causal running maximum over
     ``hold_samples``: each sample takes the largest |a| of itself and the preceding
     hold_samples - 1, so a peak is held without moving the echo earlier) -> centred moving
     average over ``average_samples``.
     """
-    if signal == 'envelope':
+    if signal in ('envelope', 'envelope_ma'):
         from scipy.signal import hilbert
         rf = np.asarray(data, dtype=np.float32)
         rf = rf - rf.mean(axis=-1, keepdims=True)
-        return np.abs(hilbert(rf, axis=-1)).astype(np.float32)
+        env = np.abs(hilbert(rf, axis=-1)).astype(np.float32)
+        if signal == 'envelope_ma' and int(average_samples) > 1:
+            env = uniform_filter1d(env, size=int(average_samples), axis=-1, mode='nearest')
+        return np.ascontiguousarray(env, dtype=np.float32)
     det = np.abs(np.asarray(data, dtype=np.float32))
     if signal == 'abs':
         return det
     if signal != 'abs_peakhold_ma':
-        raise ValueError(f"unknown detection signal {signal!r} (envelope, abs, abs_peakhold_ma)")
+        raise ValueError(f"unknown detection signal {signal!r} (envelope, envelope_ma, abs, abs_peakhold_ma)")
     h, m = int(hold_samples), int(average_samples)
     if h > 1:
         padded = np.concatenate([np.zeros(det.shape[:-1] + (h - 1,), np.float32), det], axis=-1)
@@ -307,9 +338,112 @@ def detection_signal(data, signal='abs_peakhold_ma', hold_samples=5, average_sam
     return np.ascontiguousarray(det, dtype=np.float32)
 
 
+REFINE_DEFAULTS = {'enabled': True, 'median_size': 5, 'outlier_samples': 1.5, 'window_mm': [-0.5, 2.5],
+                   'max_lag_samples': 4, 'iterations': 3, 'reference_size': 9, 'min_correlation': 0.5,
+                   'smooth_sigma_samples': 0.0}
+
+
+def _sample_traces(data, positions):
+    """Linear interpolation of every A-scan at fractional sample ``positions`` (ni, nj, m); 0 outside."""
+    n = data.shape[-1]
+    lo = np.floor(positions).astype(np.int64)
+    w = (positions - lo).astype(np.float32)
+    a0 = np.take_along_axis(data, np.clip(lo, 0, n - 1), -1)
+    a1 = np.take_along_axis(data, np.clip(lo + 1, 0, n - 1), -1)
+    out = a0 * (1 - w) + a1 * w
+    return np.where((lo >= 0) & (lo < n - 1), out, 0.0).astype(np.float32)
+
+
+def _step_metrics(shift, valid, data, dz, window_mm):
+    """% of neighbouring A-scans (both valid) whose shifts differ by >= 2 samples, along scan / index,
+    and the mean |difference| between neighbouring aligned A-scans in the echo window ("roughness")."""
+    a = np.abs(np.diff(shift, axis=1))[valid[:, 1:] & valid[:, :-1]]
+    b = np.abs(np.diff(shift, axis=0))[valid[1:] & valid[:-1]]
+    k = np.arange(int(round(window_mm[0] / dz)), int(round(window_mm[1] / dz)) + 1)
+    seg = _sample_traces(data, shift[..., None] + k)
+    r = np.abs(np.diff(seg, axis=1))[valid[:, 1:] & valid[:, :-1]]
+    return {'steps_2plus_scan_pct': round(100 * float(np.mean(a >= 2)), 2) if a.size else 0.0,
+            'steps_2plus_index_pct': round(100 * float(np.mean(b >= 2)), 2) if b.size else 0.0,
+            'roughness': round(float(r.mean()), 3) if r.size else 0.0}
+
+
+def refine_shifts(data, shift, applied, hits, dz, median_size=5, outlier_samples=1.5, window_mm=(-0.5, 2.5),
+                  max_lag_samples=4, iterations=3, reference_size=9, min_correlation=0.5, smooth_sigma_samples=0.0):
+    """Make the echo-start shifts consistent between neighbouring A-scans.
+
+    1. Spatial clean-up: a shift that differs from the median of its ``median_size`` x ``median_size``
+       neighbours by more than ``outlier_samples`` is replaced by that median (peak picking jumps
+       between lobes; a real surface is smooth at this scale).
+    2. Waveform refinement: the RF window ``window_mm`` around the aligned echo of every A-scan is
+       cross-correlated with a reference over ±``max_lag_samples``; the reference is the mean aligned
+       window of the hit A-scans in a ``reference_size`` x ``reference_size`` neighbourhood (0: the
+       median of all hit A-scans), so neighbours are aligned to each other even where the waveform
+       changes across the part. The best lag is refined to sub-sample precision with a parabola and
+       applied when the normalised correlation is >= ``min_correlation``; repeated ``iterations``
+       times, never moving a shift more than ``max_lag_samples`` from the cleaned one (keep the lag
+       below one RF period, about 7 samples at 3.5 MHz, to avoid cycle skipping).
+       All shifts are then moved by one constant so their median agrees with the detected echo.
+    3. Optional Gaussian smoothing of the shift map (``smooth_sigma_samples`` > 0; smears real steps).
+
+    Returns ``(refined_shift, info)``; shifts of A-scans not in ``applied`` are left unchanged.
+    """
+    S = np.asarray(shift, np.float64).copy()
+    info = {'before': _step_metrics(S, hits, data, dz, window_mm)}
+    fill = float(np.nanmedian(S[applied])) if applied.any() else 0.0
+    if median_size and median_size > 1:
+        med = median_filter(np.where(applied, S, fill), size=int(median_size), mode='nearest')
+        out = applied & (np.abs(S - med) > float(outlier_samples))
+        S[out] = med[out]
+        info['outliers_cleaned'] = int(out.sum())
+    L = int(max_lag_samples)
+    w0, w1 = int(round(window_mm[0] / dz)), int(round(window_mm[1] / dz))
+    W = w1 - w0 + 1
+    k = np.arange(w0 - L, w1 + L + 1)
+    base = S.copy()
+    refined, cc_best = np.zeros(S.shape, bool), np.zeros(S.shape)
+    m = hits.astype(np.float32)
+    for _ in range(int(iterations)):
+        seg = _sample_traces(data, S[..., None] + k)
+        core = seg[..., L:L + W]
+        gref = np.median(core[hits], axis=0) if hits.any() else np.zeros(W, np.float32)
+        if reference_size and reference_size > 1:
+            n = int(reference_size)
+            num = uniform_filter(core * m[..., None], size=(n, n, 1), mode='nearest')
+            den = uniform_filter(m, size=n, mode='nearest')[..., None]
+            ref = np.where(den > 1e-3, num / np.maximum(den, 1e-3), gref)
+        else:
+            ref = np.broadcast_to(gref, core.shape)
+        ref = ref - ref.mean(-1, keepdims=True)
+        win = np.lib.stride_tricks.sliding_window_view(seg, W, axis=-1)         # (ni, nj, 2L+1, W)
+        winc = win - win.mean(-1, keepdims=True)
+        cc = np.einsum('ijlw,ijw->ijl', winc, ref) / (
+            np.sqrt((winc ** 2).sum(-1)) * np.sqrt((ref ** 2).sum(-1))[..., None] + 1e-12)
+        best = np.clip(cc.argmax(-1), 1, 2 * L - 1)
+        y0, y1, y2 = (np.take_along_axis(cc, (best + d)[..., None], -1)[..., 0] for d in (-1, 0, 1))
+        den = y0 - 2 * y1 + y2
+        frac = np.where(np.abs(den) > 1e-12, np.clip(0.5 * (y0 - y2) / np.where(den == 0, 1, den), -1, 1), 0.0)
+        cc_best = y1
+        ok = applied & (y1 >= float(min_correlation))
+        S[ok] += (best - L + frac)[ok]
+        S = np.where(applied, np.clip(S, base - L, base + L), S)
+        refined |= ok
+    # keep the echo-start definition: shift everything by one constant so the refined positions agree with
+    # the detected ones on the median (cross-correlation aligns A-scans to each other, not to the detector)
+    if hits.any():
+        offset = float(np.median(np.asarray(shift, np.float64)[hits] - S[hits]))
+        S[applied] += offset
+        info['recentred_by_samples'] = round(offset, 3)
+    info['refined_by_correlation'] = int(refined.sum())
+    info['median_correlation'] = round(float(np.median(cc_best[hits])), 3) if hits.any() else None
+    if smooth_sigma_samples and smooth_sigma_samples > 0:
+        S = np.where(applied, gaussian_filter(np.where(applied, S, fill), float(smooth_sigma_samples), mode='nearest'), S)
+    info['after'] = _step_metrics(S, hits, data, dz, window_mm)
+    return S, info
+
+
 def echo_start(vol: PAUTVolume, gate_mm=(-5.0, 5.0), threshold_pct=30.0, method='first', gain=1.0,
                interpolate_missing=True, neighbors=12, pre_echo_mm=0.0,
-               signal='abs_peakhold_ma', hold_samples=5, average_samples=3):
+               signal='abs_peakhold_ma', hold_samples=5, average_samples=3, refine=None, resample='linear'):
     """Align the entrance echo of every A-scan to 0 mm (the colleague's algorithm).
 
     Detection: first (``method='first'``) or strongest (``'maximum'``) sample inside
@@ -338,6 +472,14 @@ def echo_start(vol: PAUTVolume, gate_mm=(-5.0, 5.0), threshold_pct=30.0, method=
         shift_map = np.where(hits, selected, np.nan).astype(np.float32)
         interpolated = np.zeros_like(hits)
     applied = hits | interpolated
+    coarse = shift_map.copy()
+    rinfo = {'enabled': False}
+    r = {**REFINE_DEFAULTS, **(refine or {})}
+    if refine is not None and r['enabled']:
+        shift_map, rinfo = refine_shifts(vol.data, shift_map, applied, hits, dz, r['median_size'], r['outlier_samples'],
+                                         r['window_mm'], r['max_lag_samples'], r['iterations'], r['reference_size'],
+                                         r['min_correlation'], r['smooth_sigma_samples'])
+        rinfo = {'enabled': True, 'params': {k: r[k] for k in REFINE_DEFAULTS if k != 'enabled'}, **rinfo}
     pre = int(round(max(0.0, float(pre_echo_mm)) / dz))
     # A-scans whose echo is closer than ``pre`` samples to the start of the recording: pad the
     # recording with zeros in front so they stay aligned (no padding when pre = 0).
@@ -347,7 +489,12 @@ def echo_start(vol: PAUTVolume, gate_mm=(-5.0, 5.0), threshold_pct=30.0, method=
     data = vol.data
     if pad:
         data = np.concatenate([np.zeros(data.shape[:2] + (pad,), data.dtype), data], axis=-1)
-    aligned = apply_echo_start_shifts(data, shift_map + pad - pre, applied)
+    if resample not in ('linear', 'bandlimited'):
+        raise ValueError(f"unknown resample {resample!r} (linear, bandlimited)")
+    shifter = apply_shifts_bandlimited if resample == 'bandlimited' else apply_echo_start_shifts
+    aligned = shifter(data, shift_map + pad - pre, applied)
+    s_eff = np.clip(shift_map + pad - pre, 0, data.shape[2] - 1)
+    n_frac = int((applied & (np.abs(s_eff - np.round(s_eff)) > 1e-9)).sum())
 
     echo_mm = vol.depth_mm[0] + shift_map.astype(np.float64) * dz
     zero = aligned[:, :, min(pre, aligned.shape[2] - 1)].copy()
@@ -360,12 +507,13 @@ def echo_start(vol: PAUTVolume, gate_mm=(-5.0, 5.0), threshold_pct=30.0, method=
         'hit_count': int(hits.sum()), 'interpolated_count': int(interpolated.sum()),
         'unresolved_count': int((~applied).sum()), 'trace_count': int(hits.size),
         'pre_echo_mm': float(pre * dz), 'pre_echo_samples': pre, 'clipped_pre_echo': int(clipped.sum()),
-        'zero_padded_samples': pad,
+        'zero_padded_samples': pad, 'refine': rinfo, 'resample': resample,
+        'whole_sample_shifts': int(applied.sum()) - n_frac, 'fractional_shifts': n_frac,
         'echo_mm': {'min': float(np.nanmin(echo_mm)), 'max': float(np.nanmax(echo_mm)),
                     'median': float(np.nanmedian(echo_mm))},
     }
-    qc = {'hit': hits, 'interpolated': interpolated, 'applied': applied,
-          'shift_samples': shift_map, 'echo_mm': echo_mm, 'cscan_zero': zero}
+    qc = {'hit': hits, 'interpolated': interpolated, 'applied': applied, 'shift_coarse': coarse,
+          'shift_samples': shift_map, 'echo_mm': echo_mm, 'cscan_zero': zero, 'pad': pad, 'pre': pre}
     out = replace(vol, data=aligned, depth_mm=(np.arange(aligned.shape[2]) - pre) * dz)
     return out, info, qc
 
@@ -445,10 +593,16 @@ def to_zyx(data):
 # Values stored by the colleague's tool in the _raw_3p5MHz Na_Panels .h5 files.
 DEFAULT_PARAMS = {
     'echo_start': {'enabled': True, 'gate_mm': [-5.0, 5.0], 'threshold_pct': 30.0,
-                   'method': 'maximum', 'gain': 1.0, 'interpolate_missing': True, 'neighbors': 12,
-                   # detection signal: 'envelope' (Hilbert), 'abs_peakhold_ma' (|RF| + peak hold + moving
-                   # average, sizes below) or 'abs' (plain |RF|, the colleague's files)
-                   'signal': 'envelope', 'hold_samples': 5, 'average_samples': 3},
+                   'method': 'first', 'gain': 1.0, 'interpolate_missing': True, 'neighbors': 12,
+                   # detection signal: 'envelope' (Hilbert), 'envelope_ma' (Hilbert + moving average over
+                   # average_samples), 'abs_peakhold_ma' (|RF| + peak hold + moving average, sizes below)
+                   # or 'abs' (plain |RF|, the colleague's files)
+                   'signal': 'envelope_ma', 'hold_samples': 5, 'average_samples': 5,
+                   # consistent alignment between neighbouring A-scans (clean-up + cross-correlation)
+                   'refine': dict(REFINE_DEFAULTS),
+                   # fractional shifts: 'bandlimited' (Fourier phase shift, the signal is only moved) or
+                   # 'linear' (interpolation between neighbouring samples, the colleague's; smooths slightly)
+                   'resample': 'bandlimited'},
     'footprint': {'enabled': True, 'gate_mm': [0.0, 6.0], 'threshold_pct': 15.0, 'margin_mm': 0.5},
     'depth_range_mm': [-4.0, 6.5],  # relative to the entrance echo (keeps 4 mm before it); [0, 6] = colleague's files
     # depth crop mode: 'mm' keeps depth_range_mm; 'samples' keeps depth_samples samples from depth_range_mm[0]
@@ -458,14 +612,14 @@ DEFAULT_PARAMS = {
 
 
 def merge_params(*overrides):
-    """DEFAULT_PARAMS updated (one level deep) by each override in turn."""
+    """DEFAULT_PARAMS updated (recursively, dict by dict) by each override in turn."""
+    def upd(d, o):
+        for k, v in (o or {}).items():
+            d[k] = upd(dict(d[k]), v) if isinstance(v, dict) and isinstance(d.get(k), dict) else v
+        return d
     p = json.loads(json.dumps(DEFAULT_PARAMS))
     for o in overrides:
-        for k, v in (o or {}).items():
-            if isinstance(v, dict) and isinstance(p.get(k), dict):
-                p[k] = {**p[k], **v}
-            else:
-                p[k] = v
+        upd(p, json.loads(json.dumps(o or {})))
     return p
 
 
@@ -490,7 +644,8 @@ def process(vol: PAUTVolume, params=None):
             v, es['gate_mm'], es['threshold_pct'], es['method'], es.get('gain', 1.0),
             es.get('interpolate_missing', True), es.get('neighbors', 12), pre_echo_mm=max(0.0, -lo),
             signal=es.get('signal', 'abs'), hold_samples=es.get('hold_samples', 1),
-            average_samples=es.get('average_samples', 1))
+            average_samples=es.get('average_samples', 1), refine=es.get('refine'),
+            resample=es.get('resample', 'linear'))
     else:
         record['echo_start'] = {'skipped': 'disabled (e.g. echo start applied by the equipment)'}
     qc['aligned'] = v

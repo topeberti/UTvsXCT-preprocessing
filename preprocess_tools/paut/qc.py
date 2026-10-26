@@ -29,10 +29,13 @@ def cscan(vol, depth_from_mm=0.5, origin_mm=0.0):
 
 def plot_qc(raw, out, record, qc, title='', index_row=None, depth_from_mm=0.5, fig=None):
     """Six panels: echo position before alignment, hits vs filled, auto detect piece,
-    B-scan before / after, processed C-scan."""
-    fig = fig or plt.figure(figsize=(17, 9))
+    B-scan before / after, processed C-scan. With the alignment refinement on, a third row
+    shows the change of the shift map and the B-scans along scan and index with the detected
+    (coarse) shifts next to the refined ones."""
+    refined = (record.get('echo_start') or {}).get('refine', {}).get('enabled') and qc.get('echo_start') is not None
+    fig = fig or plt.figure(figsize=(17, 13.5 if refined else 9))
     fig.clear()
-    ax = fig.subplots(2, 3)
+    ax = fig.subplots(3 if refined else 2, 3)
     ext = _extent(raw.scan_mm, raw.index_mm)
     es = qc.get('echo_start')
     b = record['crop']['bounds']
@@ -93,9 +96,61 @@ def plot_qc(raw, out, record, qc, title='', index_row=None, depth_from_mm=0.5, f
                        f"mirror index={m['index']}, scan={m['scan']}")
     ax[1, 2].set_xlabel('scan (mm)')
     ax[1, 2].set_ylabel('index (mm)')
+    if refined:
+        _plot_refinement(ax[2], raw, al, record, es, i, ext, rect, lo, hi, fig)
     fig.suptitle(title)
     fig.tight_layout()
     return fig
+
+
+def _coarse_aligned(raw, al, es, rows=slice(None), cols=slice(None)):
+    """Aligned A-scans (index ``rows``, scan ``cols``) with the detected (coarse) shifts instead of the refined ones."""
+    from .processing import _sample_traces
+    rows = np.arange(raw.data.shape[0])[rows].reshape(-1, 1)
+    cols = np.arange(raw.data.shape[1])[cols].reshape(1, -1)
+    app, sh = es['applied'][rows, cols], es['shift_coarse'][rows, cols]
+    t = np.arange(al.data.shape[-1])
+    n = raw.data.shape[-1] + es['pad']
+    s = np.clip(np.where(app, sh, 0.0) + es['pad'] - es['pre'], 0, n - 1)        # as apply_echo_start_shifts
+    pos = np.where(app[..., None], s[..., None], 0.0) + t - es['pad']
+    return _sample_traces(np.asarray(raw.data[rows, cols], np.float32), pos)
+
+
+def _plot_refinement(ax, raw, al, record, es, i, ext, rect, lo, hi, fig):
+    rf = record['echo_start']['refine']
+    d = np.where(es['applied'], es['shift_samples'] - es['shift_coarse'], np.nan)
+    v = max(1.0, float(np.nanpercentile(np.abs(d), 99))) if np.isfinite(d).any() else 1.0
+    im = ax[0].imshow(d, extent=ext, aspect='equal', cmap='RdBu_r', vmin=-v, vmax=v)
+    fig.colorbar(im, ax=ax[0], shrink=0.8, label='refined − detected (samples)')
+    a, b = rf['after'], rf['before']
+    ax[0].set_title(f"Shift change by refinement\nsteps ≥2: scan {b['steps_2plus_scan_pct']:.0f}→"
+                    f"{a['steps_2plus_scan_pct']:.0f}%, index {b['steps_2plus_index_pct']:.0f}→"
+                    f"{a['steps_2plus_index_pct']:.0f}%")
+    rect(ax[0])
+    ax[0].axhline(raw.index_mm[i], color='k', lw=0.6, ls='--')
+    ax[0].set_xlabel('scan (mm)')
+    ax[0].set_ylabel('index (mm)')
+    bnd = record['crop']['bounds']
+    j = (bnd['scan'][0] + bnd['scan'][1]) // 2
+    ax[0].axvline(raw.scan_mm[j], color='k', lw=0.6, ls=':')
+    co_row = _coarse_aligned(raw, al, es, rows=i)[0]
+    co_col = _coarse_aligned(raw, al, es, cols=j)[:, 0]
+    ext_s = [al.scan_mm[0], al.scan_mm[-1], al.depth_mm[-1], al.depth_mm[0]]
+    ext_i = [al.index_mm[0], al.index_mm[-1], al.depth_mm[-1], al.depth_mm[0]]
+    # B-scan along index at column j: detected shifts (left half) vs refined (right half) side by side
+    both = np.concatenate([co_col, np.full((2, co_col.shape[1]), np.nan), al.data[:, j]], axis=0)
+    n = al.data.shape[0]
+    ax[1].imshow(co_row.T, aspect='auto', cmap='seismic', vmin=-100, vmax=100, extent=ext_s)
+    ax[1].set_title(f'Same B-scan, detected shifts\n(no refinement)')
+    ax[1].set_xlabel('scan (mm)')
+    ax[2].imshow(both.T, aspect='auto', cmap='seismic', vmin=-100, vmax=100,
+                 extent=[0, both.shape[0], al.depth_mm[-1], al.depth_mm[0]])
+    ax[2].axvline(n + 1, color='k', lw=1)
+    ax[2].set_xticks([n / 2, n + 2 + n / 2], ['detected shifts', 'refined'])
+    ax[2].set_title(f'B-scan along index (scan {raw.scan_mm[j]:.1f} mm)\ndetected | refined')
+    for a in ax[1:]:
+        a.set_ylim(min(al.depth_mm[-1], hi + 3), min(lo, 0) - 0.5)
+        a.set_ylabel('depth (mm)')
 
 
 class AScanViewer:
@@ -176,8 +231,9 @@ class AScanViewer:
                 det = detection_signal(raw.data[r, c][None, None, :], pe['signal'], pe.get('hold_samples', 1),
                                        pe.get('average_samples', 1))[0, 0]
                 ax.plot(raw.depth_mm, det, lw=1.2, color='tab:purple',
-                        label='detection signal (Hilbert envelope)' if pe['signal'] == 'envelope' else
-                        f"detection signal (peak hold {pe['hold_samples']}, average {pe['average_samples']})")
+                        label={'envelope': 'detection signal (Hilbert envelope)',
+                               'envelope_ma': f"detection signal (Hilbert envelope, average {pe['average_samples']})"}.get(
+                            pe['signal'], f"detection signal (peak hold {pe['hold_samples']}, average {pe['average_samples']})"))
             if es is not None:
                 e = es['echo_mm'][r, c]
                 lo, hi = kept_depth_range(self.record, self.out.spacing_mm[2])

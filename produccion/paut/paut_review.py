@@ -7,9 +7,9 @@ PAUT preprocessing of every exported volume, in one go.
 does everything for all samples:
   1. converts every export .npy to <id>.tif next to it (already converted ones are skipped),
   2. uploads those original TIFFs (+ metadata, conversion record) to 01_Raw on the NAS,
-  3. imports the colleague's processed .h5 volumes into 02_Processed (with a .txt of what his
-     tool applied); those samples are marked approved and skipped by the review,
-  4. opens the review window and goes through every volume not reviewed yet. Acquisitions
+  3. opens the review window and goes through every volume not reviewed yet (including the
+     samples the colleague processed into .h5: they are reviewed with our pipeline like the rest;
+     ``import-h5`` still imports his volumes as they are, if ever needed). Acquisitions
      with "review": false in the config (echostar: echo start done by the equipment) are left out.
 
 Single steps: ``convert``, ``upload-raw``, ``import-h5``, ``review``, ``status``.
@@ -240,6 +240,7 @@ def cmd_review(cfg, items, args):
             self.w['es_gain'] = dspin(1, 0.01, 100, 2)
             self.w['es_sig'] = QtWidgets.QComboBox()
             self.w['es_sig'].addItem('Hilbert envelope', 'envelope')
+            self.w['es_sig'].addItem('Hilbert envelope + moving average', 'envelope_ma')
             self.w['es_sig'].addItem('|RF| + peak hold + moving average', 'abs_peakhold_ma')
             self.w['es_sig'].addItem('|RF| only', 'abs')
             self.w['es_hold'] = QtWidgets.QSpinBox()
@@ -258,12 +259,42 @@ def cmd_review(cfg, items, args):
             fl.addRow('detect on', self.w['es_sig'])
             fl.addRow('peak hold (samples)', self.w['es_hold'])
             fl.addRow('moving average (samples)', self.w['es_avg'])
-            sync = lambda: [self.w[k].setEnabled(self.w['es_sig'].currentData() == 'abs_peakhold_ma')
-                            for k in ('es_hold', 'es_avg')]
+            sync = lambda: (self.w['es_hold'].setEnabled(self.w['es_sig'].currentData() == 'abs_peakhold_ma'),
+                            self.w['es_avg'].setEnabled(self.w['es_sig'].currentData() in ('abs_peakhold_ma', 'envelope_ma')))
             self.w['es_sig'].currentIndexChanged.connect(sync)
             sync()
             fl.addRow(self.w['es_interp'])
             fl.addRow('neighbours', self.w['es_nb'])
+            self.w['es_res'] = QtWidgets.QComboBox()
+            self.w['es_res'].addItem('band-limited (signal only moved)', 'bandlimited')
+            self.w['es_res'].addItem('linear interpolation (colleague)', 'linear')
+            fl.addRow('fractional shifts', self.w['es_res'])
+            # refinement: make the shifts consistent between neighbouring A-scans (no steps in the B-scans)
+            self.w['rf_on'] = QtWidgets.QCheckBox('refine alignment (no steps between A-scans)')
+            self.w['rf_med'] = QtWidgets.QSpinBox()
+            self.w['rf_med'].setRange(0, 51)
+            self.w['rf_out'] = dspin(1.5, 0, 100, 2)
+            self.w['rf_w0'] = dspin(-0.5, -20, 20, 2)
+            self.w['rf_w1'] = dspin(2.5, -20, 20, 2)
+            self.w['rf_lag'] = QtWidgets.QSpinBox()
+            self.w['rf_lag'].setRange(1, 50)
+            self.w['rf_it'] = QtWidgets.QSpinBox()
+            self.w['rf_it'].setRange(1, 20)
+            self.w['rf_ref'] = QtWidgets.QSpinBox()
+            self.w['rf_ref'].setRange(0, 101)
+            self.w['rf_cc'] = dspin(0.5, 0, 1, 2)
+            self.w['rf_sm'] = dspin(0, 0, 50, 1)
+            fl.addRow(self.w['rf_on'])
+            rf_rows = [('outlier median (A-scans, 0 = off)', 'rf_med'), ('outlier limit (samples)', 'rf_out'),
+                       ('xcorr window from (mm)', 'rf_w0'), ('xcorr window to (mm)', 'rf_w1'),
+                       ('max lag (samples)', 'rf_lag'), ('iterations', 'rf_it'),
+                       ('reference neighbourhood (A-scans, 0 = global)', 'rf_ref'), ('min correlation', 'rf_cc'),
+                       ('smooth shift map (sigma, 0 = off)', 'rf_sm')]
+            for label, k in rf_rows:
+                fl.addRow(label, self.w[k])
+            rsync = lambda: [self.w[k].setEnabled(self.w['rf_on'].isChecked()) for _, k in rf_rows]
+            self.w['rf_on'].toggled.connect(rsync)
+            rsync()
             fl.addRow(QtWidgets.QLabel('<b>Auto detect piece</b>'))
             self.w['fp_on'] = QtWidgets.QCheckBox('enabled')
             self.w['fp_g0'] = dspin(0, -100, 100)
@@ -480,6 +511,15 @@ def cmd_review(cfg, items, args):
             self.w['es_avg'].setValue(es.get('average_samples', 1))
             self.w['es_interp'].setChecked(es.get('interpolate_missing', True))
             self.w['es_nb'].setValue(es.get('neighbors', 12))
+            self.w['es_res'].setCurrentIndex(max(0, self.w['es_res'].findData(es.get('resample', 'linear'))))
+            rf = {**paut.REFINE_DEFAULTS, **(es.get('refine') or {'enabled': False})}
+            self.w['rf_on'].setChecked(bool(rf['enabled']))
+            for k, name in (('rf_med', 'median_size'), ('rf_out', 'outlier_samples'), ('rf_lag', 'max_lag_samples'),
+                            ('rf_it', 'iterations'), ('rf_ref', 'reference_size'), ('rf_cc', 'min_correlation'),
+                            ('rf_sm', 'smooth_sigma_samples')):
+                self.w[k].setValue(rf[name])
+            self.w['rf_w0'].setValue(rf['window_mm'][0])
+            self.w['rf_w1'].setValue(rf['window_mm'][1])
             self.w['fp_on'].setChecked(fp['enabled'])
             self.w['fp_g0'].setValue(fp['gate_mm'][0])
             self.w['fp_g1'].setValue(fp['gate_mm'][1])
@@ -499,7 +539,13 @@ def cmd_review(cfg, items, args):
                                'threshold_pct': g('es_thr'), 'method': self.w['es_method'].currentText(),
                                'gain': g('es_gain'), 'interpolate_missing': self.w['es_interp'].isChecked(),
                                'neighbors': g('es_nb'), 'signal': self.w['es_sig'].currentData(),
-                               'hold_samples': g('es_hold'), 'average_samples': g('es_avg')},
+                               'hold_samples': g('es_hold'), 'average_samples': g('es_avg'),
+                               'resample': self.w['es_res'].currentData(),
+                               'refine': {'enabled': self.w['rf_on'].isChecked(), 'median_size': g('rf_med'),
+                                          'outlier_samples': g('rf_out'), 'window_mm': [g('rf_w0'), g('rf_w1')],
+                                          'max_lag_samples': g('rf_lag'), 'iterations': g('rf_it'),
+                                          'reference_size': g('rf_ref'), 'min_correlation': g('rf_cc'),
+                                          'smooth_sigma_samples': g('rf_sm')}},
                 'footprint': {'enabled': self.w['fp_on'].isChecked(), 'gate_mm': [g('fp_g0'), g('fp_g1')],
                               'threshold_pct': g('fp_thr'), 'margin_mm': g('fp_mg')},
                 'depth_range_mm': [g('z0'), g('z1')], 'depth_mode': self.w['zmode'].currentData(),
@@ -553,6 +599,16 @@ def cmd_review(cfg, items, args):
             es = rec.get('echo_start', {})
             es_txt = ('echo start off' if 'skipped' in es else
                       f"hits {es['hit_count']}, interpolated {es['interpolated_count']}, unresolved {es['unresolved_count']}")
+            rf = es.get('refine') or {}
+            if rf.get('enabled'):
+                b, a = rf['before'], rf['after']
+                es_txt += (f"<br>refinement: {rf['outliers_cleaned']} outliers cleaned, {rf['refined_by_correlation']} "
+                           f"refined (median corr. {rf['median_correlation']})<br>steps ≥2 samples scan "
+                           f"{b['steps_2plus_scan_pct']:g} → <b>{a['steps_2plus_scan_pct']:g} %</b>, index "
+                           f"{b['steps_2plus_index_pct']:g} → <b>{a['steps_2plus_index_pct']:g} %</b>; roughness "
+                           f"{b['roughness']:g} → <b>{a['roughness']:g}</b>")
+            elif 'skipped' not in es:
+                es_txt += '<br>refinement: off'
             self.info.setText(
                 f"<b>{it.key}</b><br>export {it.original_id} ({it.acq_key})<br>"
                 f"decision: <b>{dec.get('status', 'pending')}</b><br>02_Processed on NAS: {nas}<br>"
@@ -633,13 +689,11 @@ def cmd_review(cfg, items, args):
 
 
 def cmd_run(cfg, items, args):
-    print('== 1/4 converting exports to TIFF')
+    print('== 1/3 converting exports to TIFF')
     cmd_convert(cfg, items, args)
-    print('== 2/4 uploading original TIFFs to 01_Raw')
+    print('== 2/3 uploading original TIFFs to 01_Raw')
     cmd_upload_raw(cfg, items, args)
-    print('== 3/4 importing the colleague processed .h5 volumes')
-    cmd_import_h5(cfg, items, args)
-    print('== 4/4 review')
+    print('== 3/3 review')
     return cmd_review(cfg, items, args)
 
 

@@ -432,6 +432,51 @@ def processed_status(cfg, item, params):
     return 'current' if same else 'stale'
 
 
+def _describe_refine(rf):
+    if not rf.get('enabled'):
+        return ["   Alignment refinement: off (shifts used as detected)."]
+    q, b, a = rf['params'], rf['before'], rf['after']
+    return [f"   Alignment refinement (before applying the shifts): shifts differing from the median of their "
+            f"{q['median_size']}x{q['median_size']} neighbours by more than {q['outlier_samples']:g} samples replaced by that "
+            f"median ({rf['outliers_cleaned']} A-scans); then each A-scan cross-correlated (RF, {q['window_mm'][0]:g} .. "
+            f"{q['window_mm'][1]:g} mm around the echo) with the mean aligned waveform of its {q['reference_size']}x"
+            f"{q['reference_size']} neighbours, lag up to ±{q['max_lag_samples']} samples, sub-sample parabola, "
+            f"{q['iterations']} iterations, accepted when correlation >= {q['min_correlation']:g} ({rf['refined_by_correlation']} "
+            f"A-scans, median correlation {rf['median_correlation']}); all shifts then moved by "
+            f"{rf.get('recentred_by_samples', 0):g} samples so their median matches the detected echo"
+            + (f"; shift map smoothed with a Gaussian of sigma {q['smooth_sigma_samples']:g} A-scans" if q['smooth_sigma_samples'] else '')
+            + ".",
+            f"   Neighbouring A-scans with shifts differing by >= 2 samples: along scan {b['steps_2plus_scan_pct']:g} % -> "
+            f"{a['steps_2plus_scan_pct']:g} %, along index {b['steps_2plus_index_pct']:g} % -> {a['steps_2plus_index_pct']:g} %; "
+            f"B-scan roughness {b['roughness']:g} -> {a['roughness']:g}."]
+
+
+def _describe_shift(es):
+    """How the RF values themselves are changed by the alignment."""
+    res = es.get('resample', 'linear')
+    nf, nw = es.get('fractional_shifts'), es.get('whole_sample_shifts')
+    counts = f" ({nw} A-scans by whole samples, {nf} by fractional amounts)" if nf is not None else ''
+    L = ["   Shift applied to the signal: every A-scan of the original RF (not the detection signal, which is only",
+         "   used to find the echo) is moved earlier in time, as a whole, so its entrance echo lands at 0 mm"
+         + (f", keeping {es['pre_echo_mm']:.3f} mm before it" if es.get('pre_echo_samples') else '') + counts + ".",
+         "   - Whole-sample shifts copy the samples exactly: every RF value is unchanged, only moved."]
+    if res == 'bandlimited':
+        L.append("   - Fractional shifts are done in the Fourier domain (phase ramp, A-scan zero-padded to twice its length "
+                 "so nothing wraps around): the amplitude spectrum and the energy of the A-scan are unchanged, so the "
+                 "waveform is only moved. Individual sample values differ from the original ones because the waveform "
+                 "is sampled at points in between the original samples.")
+    else:
+        L.append("   - Fractional shifts are linear interpolation between the two neighbouring samples (the colleague's "
+                 "method): a slight low-pass, peak amplitudes can drop by a few percent.")
+    L.append("   - Samples moved past the end of the recording are set to 0 (nothing is invented at the end)"
+             + (f"; {es['zero_padded_samples']} zero samples were added before the start of the recording so A-scans "
+                f"whose echo is closer than that to it stay aligned" if es.get('zero_padded_samples') else '') + ".")
+    if es.get('clipped_pre_echo'):
+        L.append(f"   - {es['clipped_pre_echo']} A-scans had less pre-echo signal than requested.")
+    L.append("   - A-scans with no detected or interpolated echo are left as they are.")
+    return L
+
+
 def describe(rec, item, conv):
     """Human-readable account of everything done to the file."""
     p, es, fp, cr, out = rec['params'], rec.get('echo_start', {}), rec.get('footprint'), rec['crop'], rec['output']
@@ -455,10 +500,14 @@ def describe(rec, item, conv):
     if 'skipped' in es:
         L += ["2. Echo start: not applied (" + es['skipped'] + ")", ""]
     else:
-        L += ["2. Echo start (colleague's algorithm, verbatim)",
+        own = (es.get('refine') or {}).get('enabled') or es.get('resample') == 'bandlimited'
+        L += ["2. Echo start (" + ("colleague's detection and gap filling, with the alignment refinement and/or band-limited "
+                                  "shift added here)" if own else "colleague's algorithm, verbatim)"),
               ({'abs_peakhold_ma': f"   Detection signal: |RF| -> peak hold over {es.get('hold_samples')} samples (causal "
                                    f"running maximum) -> moving average over {es.get('average_samples')} samples (centred).",
-                'envelope': "   Detection signal: Hilbert envelope |hilbert(RF)| of each A-scan (mean removed first)."}
+                'envelope': "   Detection signal: Hilbert envelope |hilbert(RF)| of each A-scan (mean removed first).",
+                'envelope_ma': f"   Detection signal: Hilbert envelope |hilbert(RF)| of each A-scan (mean removed first) "
+                               f"-> moving average over {es.get('average_samples')} samples (centred)."}
                .get(es.get('detection_signal'), "   Detection signal: |RF|.") + " The shift is applied to the original RF."),
               f"   Detection: {es['method']} sample with signal x gain ({es['gain']:g}) >= {es['threshold_pct']:g} % inside "
               f"{es['gate_mm'][0]:g} .. {es['gate_mm'][1]:g} mm (samples {es['gate_samples'][0]}-{es['gate_samples'][1] - 1}).",
@@ -467,12 +516,8 @@ def describe(rec, item, conv):
               f"unresolved (not shifted): {es['unresolved_count']}.",
               f"   Entrance echo before alignment: {es['echo_mm']['min']:.3f} .. {es['echo_mm']['max']:.3f} mm "
               f"(median {es['echo_mm']['median']:.3f}).",
-              "   Every A-scan of the original RF shifted so the entrance echo is at 0 mm"
-              + (f", keeping {es['pre_echo_mm']:.3f} mm before it" if es.get('pre_echo_samples') else '')
-              + (f" ({es['zero_padded_samples']} zero samples added before the start of the recording so A-scans whose "
-                 f"echo is close to it stay aligned)" if es.get('zero_padded_samples') else '')
-              + "; whole-sample shifts copied exactly, fractional ones linearly resampled; samples past the end set to 0."
-              + (f" {es['clipped_pre_echo']} A-scans had less pre-echo signal than requested." if es.get('clipped_pre_echo') else ''),
+              *_describe_refine(es.get('refine') or {}),
+              *_describe_shift(es),
               ""]
     if fp:
         L += ["3. Auto detect piece",
@@ -541,7 +586,7 @@ def save_processed(cfg, item, result, params, note='', run_id=None, overwrite=Fa
         def _npz(t):
             with open(t, 'wb') as f:
                 np.savez_compressed(f, hit=es['hit'], interpolated=es['interpolated'], applied=es['applied'],
-                                    shift_samples=es['shift_samples'], echo_mm=es['echo_mm'],
+                                    shift_samples=es['shift_samples'], shift_coarse=es['shift_coarse'], echo_mm=es['echo_mm'],
                                     cscan_zero=es['cscan_zero'])
         npz = item.npy.with_name(f"{item.original_id}_echo_start.npz")   # local only, not on the NAS
         rec['echo_start_maps'] = {'file': str(npz), 'stored': 'locally next to the export (not on the NAS)',
@@ -725,6 +770,19 @@ def effective_transforms(params, depth_mm):
         if eff['echo_start']['signal'] == 'abs_peakhold_ma':
             eff['echo_start'].update({'hold_samples': int(es.get('hold_samples', 1)),
                                       'average_samples': int(es.get('average_samples', 1))})
+        elif eff['echo_start']['signal'] == 'envelope_ma':
+            eff['echo_start']['average_samples'] = int(es.get('average_samples', 1))
+        eff['echo_start']['resample'] = es.get('resample', 'linear')
+        rf = es.get('refine') or {}
+        eff['echo_start']['refine'] = {'enabled': bool(rf.get('enabled', False))}
+        if rf.get('enabled'):
+            from .processing import REFINE_DEFAULTS
+            rf = {**REFINE_DEFAULTS, **rf}
+            eff['echo_start']['refine'].update({
+                'median_size': int(rf['median_size']), 'outlier_samples': r(rf['outlier_samples']),
+                'window_mm': [r(x) for x in rf['window_mm']], 'max_lag_samples': int(rf['max_lag_samples']),
+                'iterations': int(rf['iterations']), 'reference_size': int(rf['reference_size']),
+                'min_correlation': r(rf['min_correlation']), 'smooth_sigma_samples': r(rf['smooth_sigma_samples'])})
     eff['footprint'] = {'enabled': bool(fp['enabled'])}
     if fp['enabled']:
         eff['footprint'].update({'gate_mm': [r(g) for g in fp['gate_mm']], 'threshold_pct': r(fp['threshold_pct']),
@@ -745,7 +803,7 @@ def colleague_equivalent_params(md):
         'echo_start': {'enabled': True, 'gate_mm': es.get('gate_mm', [-5, 5]),
                        'threshold_pct': es.get('threshold_percent', 30), 'method': es.get('method', 'first'),
                        'gain': 1.0, 'interpolate_missing': bool(es.get('interpolate_missing', True)), 'neighbors': 12,
-                       'signal': 'abs'},
+                       'signal': 'abs', 'refine': {'enabled': False}, 'resample': 'linear'},
         'footprint': {'enabled': True, 'gate_mm': ad.get('gate_mm', [0, 6]),
                       'threshold_pct': ad.get('threshold_percent', 15), 'margin_mm': ad.get('margin_mm', 0.5)},
         'depth_range_mm': md.get('final_z_mm', [0, 6]),
