@@ -1413,6 +1413,111 @@ def calculate_pore_patch_targets(onlypores_grid, mask_grid, xct_pixels_per_ut_pi
     return pores_df, pd.DataFrame(patch_rows), pore_count_map
 
 
+def _window_pore_features(blk, xct_resolution, min_voxels, min_axis):
+    feats, n_rm, vox_rm = compute_pore_features(blk, xct_resolution, min_voxels, min_axis)
+    kept_vox = int(feats.volume_vox.sum()) if len(feats) else 0
+    assert kept_vox + vox_rm == int(blk.sum()), 'kept + removed pore voxels != window pore voxels'
+    return feats, n_rm, vox_rm
+
+
+def calculate_pore_window_targets(onlypores_grid, mask_grid, xct_pixels_per_ut_pixel, patch_ut,
+                                  xct_resolution=0.025, frontwall_z=0, material_threshold=0.8,
+                                  min_voxels=8, min_axis=2, n_jobs=-1):
+    """
+    Pore count and per-pore features for every A-scan, on a `patch_ut` x `patch_ut` UT-pixel
+    window centered on it (stride 1, overlapping windows).
+
+    Window of A-scan (x, y) covers UT pixels x-h..x+h and y-h..y+h, h = patch_ut // 2, full depth.
+    Windows not fully inside the UT grid are invalid. A window is valid if its material voxel
+    count is at least `material_threshold` times the maximum over fully-inside windows.
+    Pores are computed only for valid windows, on the window block alone, so pores cut by the
+    window border are truncated (see `touches_xy_border`). A pore appears in every window that
+    contains it.
+
+    Args:
+        onlypores_grid, mask_grid (np.ndarray): XCT pores / mask aligned to the UT grid (z, x, y)
+        xct_pixels_per_ut_pixel (int): XCT pixels per UT pixel
+        patch_ut (int): Window side in UT pixels. Must be odd to be centered.
+        xct_resolution (float, optional): Voxel size in mm. Defaults to 0.025.
+        frontwall_z (int, optional): Material frontwall slice, origin of the pore depth.
+        material_threshold (float, optional): Window validity threshold. Defaults to 0.8.
+        min_voxels, min_axis (int, optional): Pore filter, see `compute_pore_features`.
+        n_jobs (int, optional): joblib workers. Defaults to -1.
+
+    Returns:
+        tuple: (pores_df, windows_df, pore_count_map)
+            - pores_df: one row per (A-scan, kept pore). `ut_x`, `ut_y` = A-scan position
+              (window center), `ut_x0/x1/y0/y1` = window UT range (end exclusive),
+              `pore_ut_x`, `pore_ut_y` = UT pixel of the pore centroid, centroid depth from the
+              frontwall in mm and the shape features.
+            - windows_df: one row per A-scan (ut_x, ut_y) with inside/valid flags, material
+              voxels and fraction, pore_count and filtered pore/voxel counts.
+            - pore_count_map: (ut_x, ut_y) float32, -1 for invalid windows.
+    """
+    if patch_ut % 2 == 0:
+        raise ValueError(f"patch_ut must be odd to center the window on the A-scan. Got {patch_ut}.")
+    px = xct_pixels_per_ut_pixel
+    h = patch_ut // 2
+    _, X, Y = mask_grid.shape
+    nx, ny = X // px, Y // px
+    if nx < patch_ut or ny < patch_ut:
+        raise ValueError(f"Window of {patch_ut} UT pixels does not fit in the UT grid {(nx, ny)}")
+
+    def box_sum(a):
+        """Sum of `a` over the patch_ut x patch_ut window centered on each fully-inside pixel."""
+        c = np.zeros((nx + 1, ny + 1), dtype=np.int64)
+        c[1:, 1:] = a.astype(np.int64).cumsum(0).cumsum(1)
+        w = patch_ut
+        s = c[w:, w:] - c[:-w, w:] - c[w:, :-w] + c[:-w, :-w]
+        full = np.zeros((nx, ny), dtype=np.int64)
+        full[h:nx - h, h:ny - h] = s
+        return full
+
+    inside = np.zeros((nx, ny), dtype=bool)
+    inside[h:nx - h, h:ny - h] = True
+    mat = box_sum(calculate_material_voxels_map(mask_grid, px))
+    pore_vox = box_sum(calculate_material_voxels_map(onlypores_grid, px))
+    mat_max = mat[inside].max()
+    mat_fraction = mat / mat_max if mat_max > 0 else np.zeros(mat.shape)
+    valid = inside & (mat_fraction >= material_threshold)
+
+    def one_window(x, y):
+        blk = onlypores_grid[:, (x - h) * px:(x + h + 1) * px, (y - h) * px:(y + h + 1) * px]
+        return x, y, _window_pore_features(blk, xct_resolution, min_voxels, min_axis)
+
+    todo = [(x, y) for x, y in zip(*np.nonzero(valid & (pore_vox > 0)))]
+    results = Parallel(n_jobs=n_jobs)(delayed(one_window)(int(x), int(y)) for x, y in tqdm(todo, desc='pore windows'))
+    computed = {(x, y): r for x, y, r in results}
+
+    pore_count_map = np.full((nx, ny), -1, dtype=np.float32)
+    pore_count_map[valid] = 0
+    window_rows, pore_parts = [], []
+    for x in range(nx):
+        for y in range(ny):
+            row = {'ut_x': x, 'ut_y': y, 'inside': bool(inside[x, y]),
+                   'material_voxels': int(mat[x, y]), 'material_fraction': float(mat_fraction[x, y]),
+                   'valid': bool(valid[x, y]), 'pore_count': np.nan,
+                   'removed_pores': np.nan, 'removed_voxels': np.nan}
+            if valid[x, y]:
+                feats, n_rm, vox_rm = computed.get((x, y), (pd.DataFrame(), 0, 0))
+                row.update(pore_count=len(feats), removed_pores=n_rm, removed_voxels=vox_rm)
+                pore_count_map[x, y] = len(feats)
+                if len(feats):
+                    x0, y0 = x - h, y - h
+                    feats = feats.copy()
+                    feats['pore_ut_x'] = x0 + np.floor(feats.centroid_x_vox / px).astype(int)
+                    feats['pore_ut_y'] = y0 + np.floor(feats.centroid_y_vox / px).astype(int)
+                    feats['centroid_z_mm_from_frontwall'] = (feats.centroid_z_vox - frontwall_z) * xct_resolution
+                    for k, (name, val) in enumerate([('ut_x', x), ('ut_y', y), ('ut_x0', x0), ('ut_x1', x + h + 1),
+                                                     ('ut_y0', y0), ('ut_y1', y + h + 1)]):
+                        feats.insert(k, name, val)
+                    pore_parts.append(feats)
+            window_rows.append(row)
+
+    pores_df = pd.concat(pore_parts, ignore_index=True) if pore_parts else pd.DataFrame()
+    return pores_df, pd.DataFrame(window_rows), pore_count_map
+
+
 def main_images_pores(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1.0,
                       material_threshold=0.8, pore_patch_ut=5,
                       min_pore_voxels=8, min_pore_axis_voxels=2):
@@ -1421,20 +1526,20 @@ def main_images_pores(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolutio
 
     Same preprocessing and maps as `main_images`, plus:
     - per-UT-pixel material voxel count, thickness (mm) and full-depth VVF maps;
-    - pore count and per-pore features on `pore_patch_ut` x `pore_patch_ut` UT-pixel patches.
+    - pore count and per-pore features for every A-scan on a centered `pore_patch_ut` x `pore_patch_ut` UT-pixel window.
 
     Args:
         onlypores, mask, ut_rf (np.ndarray): XCT pores, XCT material mask, UT volume (z, x, y)
         xct_resolution, ut_resolution (float): Resolutions in mm
         material_threshold (float, optional): Valid-pixel/patch material threshold. Defaults to 0.8.
-        pore_patch_ut (int, optional): Pore patch side in UT pixels. Defaults to 5.
+        pore_patch_ut (int, optional): Pore window side in UT pixels (odd). Defaults to 5.
         min_pore_voxels, min_pore_axis_voxels (int, optional): Pore filter.
 
     Returns:
         dict: ut_image (z, x, y); volfrac_maps (3, x, y); areafrac_image (x, y);
             depth_rois; vvf_full_map (x, y); material_voxels_map (x, y);
             thickness_map (x, y, mm);
-            pores_df; pore_patches_df; pore_count_map (x//patch, y//patch)
+            pores_df (per A-scan, pore); pore_patches_df (per A-scan); pore_count_map (x, y)
     """
     xct_pixels = calculate_pixels(ut_resolution, xct_resolution, 1)
     px = int(np.round(xct_pixels))
@@ -1452,7 +1557,7 @@ def main_images_pores(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolutio
     thickness_map = calculate_thickness_map(mask_grid, px, xct_resolution)
     vvf_full_map = calculate_full_vvf_map(onlypores_grid, mask_grid, px, material_threshold)
 
-    pores_df, pore_patches_df, pore_count_map = calculate_pore_patch_targets(
+    pores_df, pore_patches_df, pore_count_map = calculate_pore_window_targets(
         onlypores_grid, mask_grid, px, pore_patch_ut,
         xct_resolution=xct_resolution,
         frontwall_z=depth_rois[0]['material_frontwall_z'],
@@ -1464,4 +1569,172 @@ def main_images_pores(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolutio
         'depth_rois': depth_rois, 'vvf_full_map': vvf_full_map,
         'material_voxels_map': material_voxels_map, 'thickness_map': thickness_map, 'pores_df': pores_df,
         'pore_patches_df': pore_patches_df, 'pore_count_map': pore_count_map,
+    }
+
+
+def _window_box_sum(a, patch_ut):
+    """
+    Sum of `a` over the patch_ut x patch_ut window centered on each fully-inside UT pixel.
+
+    Args:
+        a (np.ndarray): (nx, ny) or (nx, ny, nb) array of per-UT-pixel values
+        patch_ut (int): Window side in UT pixels (odd)
+
+    Returns:
+        np.ndarray: int64 array of the same shape as `a`; zero where the window is not fully inside the grid
+    """
+    if patch_ut % 2 == 0:
+        raise ValueError(f"patch_ut must be odd to center the window on the A-scan. Got {patch_ut}.")
+    h, w = patch_ut // 2, patch_ut
+    nx, ny = a.shape[:2]
+    c = np.zeros((nx + 1, ny + 1) + a.shape[2:], dtype=np.int64)
+    c[1:, 1:] = a.astype(np.int64).cumsum(0).cumsum(1)
+    s = c[w:, w:] - c[:-w, w:] - c[w:, :-w] + c[:-w, :-w]
+    out = np.zeros(a.shape, dtype=np.int64)
+    out[h:nx - h, h:ny - h] = s
+    return out
+
+
+def calculate_depth_histograms(onlypores_grid, mask_grid, xct_pixels_per_ut_pixel, nb_u=100):
+    """
+    Pore and material voxel histograms along depth for every UT pixel, with depth measured per XCT column.
+
+    For each XCT column (x, y) the front is the first material slice, the back the last material slice + 1,
+    and T = back - front. A voxel at slice z has depth d = z - front (slices) and normalised depth
+    u = (d + 0.5) / T in (0, 1). Pores are a subset of the mask, so every pore voxel falls inside its own
+    column's [front, back): there are no pores outside the material by construction. Pores spanning bins are
+    split voxel by voxel, and the per-bin material count is stored, so per-bin VVF = pore / material needs no
+    uniformity assumption.
+
+    Args:
+        onlypores_grid, mask_grid (np.ndarray): XCT pores / material mask aligned to the UT grid (z, x, y)
+        xct_pixels_per_ut_pixel (int): XCT pixels per UT pixel in x-y
+        nb_u (int, optional): Number of bins of normalised depth. Defaults to 100.
+
+    Returns:
+        dict of per-UT-pixel arrays (nx, ny, nb) unless noted:
+            pore_u, mat_u (nb_u bins of u); pore_d, mat_d (bins of d, one per slice, trimmed to the
+            largest column thickness); front_mean, front_std, back_mean, thickness_mean, thickness_std,
+            (nx, ny) float32 in slices, 0 where no material; columns (nx, ny) number of material columns.
+    """
+    b = xct_pixels_per_ut_pixel
+    nz, X, Y = mask_grid.shape
+    nx, ny = X // b, Y // b
+    nd = nz
+    pore_u = np.zeros((nx, ny, nb_u), dtype=np.int64)
+    mat_u = np.zeros_like(pore_u)
+    pore_d = np.zeros((nx, ny, nd), dtype=np.int64)
+    mat_d = np.zeros_like(pore_d)
+    n_col = np.zeros((nx, ny))
+    s_front = np.zeros((nx, ny)); s_front2 = np.zeros((nx, ny))
+    s_back = np.zeros((nx, ny))
+    s_thick = np.zeros((nx, ny)); s_thick2 = np.zeros((nx, ny))
+    max_t = 0
+    z_idx = np.arange(nz)[:, None]
+    ut_col = (np.arange(Y) // b)
+
+    for i in tqdm(range(nx), desc='depth histograms'):
+        m = mask_grid[:, i * b:(i + 1) * b, :].reshape(nz, b * Y).astype(bool)
+        p = onlypores_grid[:, i * b:(i + 1) * b, :].reshape(nz, b * Y).astype(bool)
+        if (p & ~m).any():
+            raise ValueError("Pore voxels outside the material mask")
+        has = m.any(axis=0)
+        front = np.argmax(m, axis=0)
+        back = nz - np.argmax(m[::-1], axis=0)
+        thick = np.where(has, back - front, 1)
+        max_t = max(max_t, int(thick[has].max()) if has.any() else 0)
+        col_ut = np.tile(ut_col, b)  # column c = a * Y + y -> UT column y // b
+        for arr, hist_u, hist_d in ((m, mat_u, mat_d), (p, pore_u, pore_d)):
+            zi, ci = np.nonzero(arr)
+            d = zi - front[ci]
+            u_bin = np.minimum(((d + 0.5) / thick[ci] * nb_u).astype(np.int64), nb_u - 1)
+            j = col_ut[ci]
+            hist_u[i] += np.bincount(j * nb_u + u_bin, minlength=ny * nb_u).reshape(ny, nb_u)
+            hist_d[i] += np.bincount(j * nd + d, minlength=ny * nd).reshape(ny, nd)
+        j_has = col_ut[has]
+        for acc, v in ((n_col, np.ones(has.sum())), (s_front, front[has]), (s_front2, front[has] ** 2.0),
+                       (s_back, back[has]), (s_thick, thick[has]), (s_thick2, thick[has] ** 2.0)):
+            acc[i] += np.bincount(j_has, weights=v, minlength=ny)
+
+    safe = np.maximum(n_col, 1)
+    def mean(s): return (s / safe).astype(np.float32)
+    def std(s, s2): return np.sqrt(np.maximum(s2 / safe - (s / safe) ** 2, 0)).astype(np.float32)
+    return {
+        'pore_u': pore_u, 'mat_u': mat_u, 'pore_d': pore_d[..., :max_t], 'mat_d': mat_d[..., :max_t],
+        'front_mean': mean(s_front), 'front_std': std(s_front, s_front2), 'back_mean': mean(s_back),
+        'thickness_mean': mean(s_thick), 'thickness_std': std(s_thick, s_thick2), 'columns': n_col.astype(np.int64),
+    }
+
+
+def main_images_depth(onlypores, mask, ut_rf, xct_resolution=0.025, ut_resolution=1.0,
+                      material_threshold=0.8, patch_ut=5, nb_u=100):
+    """
+    Image-shaped UT vs XCT pipeline with depth-resolved void labels (per-column depth histograms).
+
+    Same preprocessing and grid as `main_images_pores` (identical UT x, y indices), but the labels are
+    pore and material voxel histograms along depth (see `calculate_depth_histograms`), summed over a centered
+    `patch_ut` x `patch_ut` UT-pixel window for every A-scan (stride 1).
+
+    Args:
+        onlypores, mask, ut_rf (np.ndarray): XCT pores, XCT material mask, UT volume (z, x, y)
+        xct_resolution, ut_resolution (float): Resolutions in mm
+        material_threshold (float, optional): Window validity threshold, same rule as
+            `calculate_pore_window_targets`. Defaults to 0.8.
+        patch_ut (int, optional): Window side in UT pixels (odd). Defaults to 5.
+        nb_u (int, optional): Bins of normalised depth. Defaults to 100.
+
+    Returns:
+        dict: ut_image (z, x, y); depth_rois; vvf_full_map, material_voxels_map, thickness_map (x, y);
+            pixel histograms and column statistics from `calculate_depth_histograms`;
+            pore_u_window, mat_u_window (x, y, nb_u) and pore_d_window, mat_d_window (x, y, nd),
+            zero where the window is not valid; windows_df (per A-scan: ut_x, ut_y, inside, valid,
+            material_voxels, pore_voxels, vvf_window)
+    """
+    xct_pixels = calculate_pixels(ut_resolution, xct_resolution, 1)
+    px = int(np.round(xct_pixels))
+    if px <= 0 or not np.isclose(xct_pixels, px):
+        raise ValueError(f"UT/XCT resolution ratio must be an integer. Got {xct_pixels}.")
+
+    onlypores_cropped, mask_cropped, ut_rf_cropped = preprocess(
+        onlypores, mask, ut_rf, xct_resolution, ut_resolution)
+    onlypores_grid, mask_grid, ut_image = align_to_ut_grid(
+        onlypores_cropped, mask_cropped, ut_rf_cropped, px)
+
+    depth_rois = calculate_depth_rois(mask_grid)
+    material_voxels_map = calculate_material_voxels_map(mask_grid, px)
+    pore_voxels_map = calculate_material_voxels_map(onlypores_grid, px)
+    thickness_map = calculate_thickness_map(mask_grid, px, xct_resolution)
+    vvf_full_map = calculate_full_vvf_map(onlypores_grid, mask_grid, px, material_threshold)
+
+    hist = calculate_depth_histograms(onlypores_grid, mask_grid, px, nb_u=nb_u)
+    for key, total in (('mat_u', material_voxels_map), ('mat_d', material_voxels_map),
+                       ('pore_u', pore_voxels_map), ('pore_d', pore_voxels_map)):
+        if not np.array_equal(hist[key].sum(axis=2), total):
+            raise ValueError(f"Histogram {key} does not sum to the per-pixel voxel count")
+
+    nx, ny = material_voxels_map.shape
+    h = patch_ut // 2
+    inside = np.zeros((nx, ny), dtype=bool)
+    inside[h:nx - h, h:ny - h] = True
+    mat_win = _window_box_sum(material_voxels_map, patch_ut)
+    pore_win = _window_box_sum(pore_voxels_map, patch_ut)
+    mat_max = mat_win[inside].max()
+    mat_fraction = mat_win / mat_max if mat_max > 0 else np.zeros(mat_win.shape)
+    valid = inside & (mat_fraction >= material_threshold)
+
+    windows = {}
+    for key in ('pore_u', 'mat_u', 'pore_d', 'mat_d'):
+        windows[f'{key}_window'] = np.where(valid[..., None], _window_box_sum(hist[key], patch_ut), 0)
+
+    ut_x, ut_y = np.meshgrid(np.arange(nx), np.arange(ny), indexing='ij')
+    vvf_window = np.divide(pore_win, mat_win, out=np.full(mat_win.shape, np.nan), where=mat_win > 0)
+    windows_df = pd.DataFrame({
+        'ut_x': ut_x.ravel(), 'ut_y': ut_y.ravel(), 'inside': inside.ravel(), 'valid': valid.ravel(),
+        'material_voxels': mat_win.ravel(), 'pore_voxels': pore_win.ravel(),
+        'vvf_window': np.where(valid, vvf_window, np.nan).ravel()})
+
+    return {
+        'ut_image': ut_image, 'depth_rois': depth_rois, 'vvf_full_map': vvf_full_map,
+        'material_voxels_map': material_voxels_map, 'thickness_map': thickness_map,
+        **hist, **windows, 'windows_df': windows_df,
     }
